@@ -1,0 +1,37 @@
+name: content-plus-prefix-inside-hunk
+registry:
+  policy:
+    apiVersion: gatekeeper/v1
+    lanes: { human: { type: human-approval, min: 1, fresh: true } }
+    levels:
+      breaking-review-required:
+        enforcement: block
+        require: { m: 1, lanes: [human] }
+  contracts:
+    - apiVersion: gatekeeper/v1
+      name: plus-prefix
+      level: breaking-review-required
+      authority:
+        repo: org/app
+        paths: ["src/**"]
+        if_content: '\+\+\+ TOKEN'
+input:
+  repo: org/app
+  changedFiles:
+    - path: src/feature.txt
+      status: M
+      patch: |-
+        --- a/src/feature.txt
+        +++ b/src/feature.txt
+        @@ -0,0 +1 @@
+        ++++ TOKEN
+expected:
+  decision: block
+  touched: [plus-prefix]
+  forbiddenEdits: []
+  fileChecks:
+    - contract: plus-prefix
+      path: src/feature.txt
+      matchedPath: src/feature.txt
+      contentCheck: matched
+

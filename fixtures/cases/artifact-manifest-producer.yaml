@@ -1,0 +1,39 @@
+name: artifact-manifest-producer
+realWorld: true
+registry:
+  policy:
+    apiVersion: gatekeeper/v1
+    lanes: { human: { type: human-approval, min: 1, fresh: true } }
+    levels:
+      breaking-review-required:
+        enforcement: block
+        require: { m: 1, lanes: [human] }
+  contracts:
+    - apiVersion: gatekeeper/v1
+      name: artifact-manifest
+      level: breaking-review-required
+      authority:
+        repo: org/schemas
+        paths: ["artifact/manifest.schema.json"]
+      consumers:
+        - { repo: org/syncify, paths: ["release/manifests/**"], role: producer, verify: "npm run release:check" }
+        - { repo: org/hub, paths: ["release/manifests/**"], role: producer, verify: "make release-check" }
+        - { repo: org/slink, paths: ["release/manifests/**"], role: producer, verify: "go test ./..." }
+        - { repo: org/deploy, paths: ["deploy/readers/**"], role: consumer, verify: "bin/validate" }
+input:
+  repo: org/syncify
+  actor: release-bot[bot]
+  changedFiles: [{ path: "release/manifests/v2.json", status: A }]
+expected:
+  decision: block
+  touched: [artifact-manifest]
+  forbiddenEdits: []
+  consumerCount: { artifact-manifest: 4 }
+  fileChecks:
+    - contract: artifact-manifest
+      kind: consumer
+      role: producer
+      path: release/manifests/v2.json
+      matchedPath: release/manifests/v2.json
+      contentCheck: not-configured
+

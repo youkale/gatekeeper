@@ -1,0 +1,22 @@
+name: no-contract-hit
+registry:
+  policy:
+    apiVersion: gatekeeper/v1
+    lanes: { human: { type: human-approval, min: 1, fresh: true } }
+    levels:
+      breaking-review-required:
+        enforcement: block
+        require: { m: 1, lanes: [human] }
+  contracts:
+    - apiVersion: gatekeeper/v1
+      name: public-api
+      level: breaking-review-required
+      authority: { repo: org/app, paths: ["src/public/**"] }
+input:
+  repo: org/app
+  changedFiles: [{ path: "src/internal/cache.ts", status: M }]
+expected:
+  decision: pass
+  touched: []
+  forbiddenEdits: []
+

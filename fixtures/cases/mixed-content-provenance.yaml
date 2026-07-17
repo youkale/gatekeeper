@@ -1,0 +1,51 @@
+name: mixed-content-provenance
+registry:
+  policy:
+    apiVersion: gatekeeper/v1
+    lanes: {}
+    levels:
+      notify-only:
+        enforcement: warn
+        require: {}
+  contracts:
+    - apiVersion: gatekeeper/v1
+      name: mixed-frozen
+      level: notify-only
+      authority: { repo: org/source, paths: ["api/**"] }
+      consumers:
+        - repo: org/app
+          paths: ["vendor/generated/**"]
+          role: mirror-frozen
+          allow_actors: ["codegen[bot]"]
+          if_content: BREAKING
+input:
+  repo: org/app
+  actor: alice
+  changedFiles:
+    - path: vendor/generated/a.ts
+      status: M
+      patch: |-
+        @@ -1 +1 @@
+        -const mode = "stable";
+        +const mode = "BREAKING";
+    - path: vendor/generated/b.ts
+      status: M
+      patch: |-
+        @@ -1 +1 @@
+        -const spacing = 1;
+        +const spacing = 2;
+expected:
+  decision: block
+  touched: [mixed-frozen]
+  forbiddenEdits: [mixed-frozen]
+  forbiddenFilePaths: { mixed-frozen: ["vendor/generated/a.ts"] }
+  fileChecks:
+    - contract: mixed-frozen
+      path: vendor/generated/a.ts
+      matchedPath: vendor/generated/a.ts
+      contentCheck: matched
+    - contract: mixed-frozen
+      path: vendor/generated/b.ts
+      matchedPath: vendor/generated/b.ts
+      contentCheck: no-match
+

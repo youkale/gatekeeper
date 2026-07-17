@@ -1,0 +1,25 @@
+name: enforcement-override-downgrade
+registry:
+  policy:
+    apiVersion: gatekeeper/v1
+    lanes: { human: { type: human-approval, min: 1, fresh: true } }
+    levels:
+      breaking-review-required:
+        enforcement: block
+        require: { m: 1, lanes: [human] }
+    adoption: { enforcement_override: warn }
+  contracts:
+    - apiVersion: gatekeeper/v1
+      name: public-api
+      level: breaking-review-required
+      authority: { repo: org/app, paths: ["src/public/**"] }
+input:
+  repo: org/app
+  changedFiles: [{ path: "src/public/client.ts", status: M }]
+expected:
+  decision: warn
+  touched: [public-api]
+  forbiddenEdits: []
+  levels: { public-api: breaking-review-required }
+  enforcement: { public-api: block }
+  effectiveEnforcement: { public-api: warn }

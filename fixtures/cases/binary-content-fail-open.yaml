@@ -1,0 +1,30 @@
+name: binary-content-fail-open
+registry:
+  policy:
+    apiVersion: gatekeeper/v1
+    lanes: { human: { type: human-approval, min: 1, fresh: true } }
+    levels:
+      breaking-review-required:
+        enforcement: block
+        require: { m: 1, lanes: [human] }
+  contracts:
+    - apiVersion: gatekeeper/v1
+      name: generated-descriptor
+      level: breaking-review-required
+      authority:
+        repo: org/assets
+        paths: ["dist/**"]
+        if_content: "schemaVersion"
+input:
+  repo: org/assets
+  changedFiles: [{ path: "dist/descriptor.bin", status: M }]
+expected:
+  decision: block
+  touched: [generated-descriptor]
+  forbiddenEdits: []
+  fileChecks:
+    - contract: generated-descriptor
+      path: dist/descriptor.bin
+      matchedPath: dist/descriptor.bin
+      contentCheck: skipped-no-patch
+

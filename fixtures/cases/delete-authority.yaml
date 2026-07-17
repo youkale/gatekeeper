@@ -1,0 +1,28 @@
+name: delete-authority
+registry:
+  policy:
+    apiVersion: gatekeeper/v1
+    lanes: { human: { type: human-approval, min: 1, fresh: true } }
+    levels:
+      breaking-review-required:
+        enforcement: block
+        require: { m: 1, lanes: [human] }
+  contracts:
+    - apiVersion: gatekeeper/v1
+      name: public-schema
+      level: breaking-review-required
+      authority: { repo: org/schemas, paths: ["api/schema.json"] }
+input:
+  repo: org/schemas
+  changedFiles: [{ path: "api/schema.json", status: D }]
+expected:
+  decision: block
+  touched: [public-schema]
+  forbiddenEdits: []
+  fileChecks:
+    - contract: public-schema
+      path: api/schema.json
+      status: D
+      matchedPath: api/schema.json
+      contentCheck: not-configured
+

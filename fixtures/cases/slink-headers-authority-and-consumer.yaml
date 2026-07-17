@@ -1,0 +1,61 @@
+name: slink-headers-authority-and-consumer
+realWorld: true
+registry:
+  policy:
+    apiVersion: gatekeeper/v1
+    lanes: { human: { type: human-approval, min: 1, fresh: true } }
+    levels:
+      breaking-review-required:
+        enforcement: block
+        require: { m: 1, lanes: [human] }
+  contracts:
+    - apiVersion: gatekeeper/v1
+      name: slink-headers
+      level: breaking-review-required
+      authority:
+        repo: youkale/slink
+        paths: ["internal/protocol/**"]
+        if_content: "X-Slink-(Client-ID|Alias)"
+      consumers:
+        - repo: youkale/slink
+          paths: ["cmd/**"]
+          role: consumer
+          verify: go test ./...
+          if_content: "X-Slink-(Client-ID|Alias)"
+input:
+  repo: youkale/slink
+  actor: maintainer
+  changedFiles:
+    - path: internal/protocol/headers.go
+      status: M
+      patch: |-
+        --- a/internal/protocol/headers.go
+        +++ b/internal/protocol/headers.go
+        @@ -1 +1 @@
+        -const ClientHeader = "X-Slink-Client-ID"
+        +const ClientHeader = "X-Slink-Alias"
+    - path: cmd/proxy/main.go
+      status: M
+      patch: |-
+        --- a/cmd/proxy/main.go
+        +++ b/cmd/proxy/main.go
+        @@ -2 +2 @@
+        -header.Get("X-Slink-Client-ID")
+        +header.Get("X-Slink-Alias")
+expected:
+  decision: block
+  touched: [slink-headers]
+  forbiddenEdits: []
+  fileChecks:
+    - contract: slink-headers
+      kind: authority
+      path: internal/protocol/headers.go
+      matchedPath: internal/protocol/headers.go
+      contentCheck: matched
+    - contract: slink-headers
+      kind: consumer
+      role: consumer
+      path: cmd/proxy/main.go
+      matchedPath: cmd/proxy/main.go
+      contentCheck: matched
+

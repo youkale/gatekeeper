@@ -1,0 +1,37 @@
+name: manuals-sync-allowed-actor
+realWorld: true
+registry:
+  policy:
+    apiVersion: gatekeeper/v1
+    lanes: {}
+    levels:
+      notify-only:
+        enforcement: warn
+        require: {}
+  contracts:
+    - apiVersion: gatekeeper/v1
+      name: manuals-sync
+      level: notify-only
+      authority:
+        repo: org/manufacturer
+        paths: ["manuals/**"]
+      consumers:
+        - repo: org/agent
+          paths: ["manufacturer/**"]
+          role: mirror-frozen
+          allow_actors: ["manuals-sync[bot]"]
+input:
+  repo: org/agent
+  actor: manuals-sync[bot]
+  changedFiles: [{ path: "manufacturer/wangdian/README.md", status: M }]
+expected:
+  decision: warn
+  touched: [manuals-sync]
+  forbiddenEdits: []
+  fileChecks:
+    - contract: manuals-sync
+      role: mirror-frozen
+      path: manufacturer/wangdian/README.md
+      matchedPath: manufacturer/wangdian/README.md
+      contentCheck: not-configured
+

@@ -1,0 +1,42 @@
+name: multiple-consumer-bindings-not-deduped
+registry:
+  policy:
+    apiVersion: gatekeeper/v1
+    lanes: {}
+    levels:
+      notify-only:
+        enforcement: warn
+        require: {}
+  contracts:
+    - apiVersion: gatekeeper/v1
+      name: layered-client
+      level: notify-only
+      authority: { repo: org/source, paths: ["api/**"] }
+      consumers:
+        - { repo: org/app, paths: ["src/client/**"], role: consumer, verify: "npm run test:client" }
+        - { repo: org/app, paths: ["src/**"], role: producer, verify: "npm run test:producer" }
+input:
+  repo: org/app
+  changedFiles: [{ path: "src/client/index.ts", status: M }]
+expected:
+  decision: warn
+  touched: [layered-client]
+  forbiddenEdits: []
+  bindingCount: { layered-client: 2 }
+  fileChecks:
+    - contract: layered-client
+      kind: consumer
+      role: consumer
+      bindingRepo: org/app
+      verify: "npm run test:client"
+      path: src/client/index.ts
+      matchedPath: src/client/index.ts
+      contentCheck: not-configured
+    - contract: layered-client
+      kind: consumer
+      role: producer
+      bindingRepo: org/app
+      verify: "npm run test:producer"
+      path: src/client/index.ts
+      matchedPath: src/client/index.ts
+      contentCheck: not-configured

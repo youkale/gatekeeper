@@ -1,0 +1,32 @@
+name: ci-image-tag-unrelated-line
+registry:
+  policy:
+    apiVersion: gatekeeper/v1
+    lanes: { human: { type: human-approval, min: 1, fresh: true } }
+    levels:
+      breaking-review-required:
+        enforcement: block
+        require: { m: 1, lanes: [human] }
+  contracts:
+    - apiVersion: gatekeeper/v1
+      name: ci-image-tag
+      level: breaking-review-required
+      authority:
+        repo: org/app
+        paths: [".github/workflows/**"]
+        if_content: 'image:\s+ghcr\.io/org/app:v\d+'
+input:
+  repo: org/app
+  changedFiles:
+    - path: .github/workflows/release.yml
+      status: M
+      patch: |-
+        --- a/.github/workflows/release.yml
+        +++ b/.github/workflows/release.yml
+        @@ -8 +8 @@
+        -  timeout-minutes: 10
+        +  timeout-minutes: 15
+expected:
+  decision: pass
+  touched: []
+  forbiddenEdits: []

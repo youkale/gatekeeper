@@ -1,0 +1,25 @@
+name: duplicate-changed-file-dedup
+registry:
+  policy:
+    apiVersion: gatekeeper/v1
+    lanes: {}
+    levels:
+      notify-only:
+        enforcement: warn
+        require: {}
+  contracts:
+    - apiVersion: gatekeeper/v1
+      name: deduplicated-files
+      level: notify-only
+      authority: { repo: org/app, paths: ["src/**"] }
+input:
+  repo: org/app
+  changedFiles:
+    - { path: "src/a.ts", status: M }
+    - { path: "src/a.ts", status: M }
+expected:
+  decision: warn
+  touched: [deduplicated-files]
+  forbiddenEdits: []
+  bindingFileCount: { deduplicated-files: 1 }
+

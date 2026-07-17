@@ -1,0 +1,26 @@
+name: mirror-frozen-actor-undefined
+registry:
+  policy:
+    apiVersion: gatekeeper/v1
+    lanes: {}
+    levels:
+      notify-only:
+        enforcement: warn
+        require: {}
+  contracts:
+    - apiVersion: gatekeeper/v1
+      name: generated-client
+      level: notify-only
+      authority: { repo: org/api, paths: ["openapi.yaml"] }
+      consumers:
+        - repo: org/app
+          paths: ["src/generated/**"]
+          role: mirror-frozen
+          allow_actors: ["codegen[bot]"]
+input:
+  repo: org/app
+  changedFiles: [{ path: "src/generated/client.ts", status: M }]
+expected:
+  decision: block
+  touched: [generated-client]
+  forbiddenEdits: [generated-client]

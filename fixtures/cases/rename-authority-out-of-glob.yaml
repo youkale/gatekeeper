@@ -1,0 +1,30 @@
+name: rename-authority-out-of-glob
+registry:
+  policy:
+    apiVersion: gatekeeper/v1
+    lanes: { human: { type: human-approval, min: 1, fresh: true } }
+    levels:
+      breaking-review-required:
+        enforcement: block
+        require: { m: 1, lanes: [human] }
+  contracts:
+    - apiVersion: gatekeeper/v1
+      name: artifact-manifest
+      level: breaking-review-required
+      authority: { repo: org/schemas, paths: ["manifest/schema.json"] }
+input:
+  repo: org/schemas
+  actor: alice
+  changedFiles: [{ path: "archive/schema.json", status: R, oldPath: "manifest/schema.json" }]
+expected:
+  decision: block
+  touched: [artifact-manifest]
+  forbiddenEdits: []
+  fileChecks:
+    - contract: artifact-manifest
+      path: archive/schema.json
+      status: R
+      matchedPath: manifest/schema.json
+      matchedGlob: manifest/schema.json
+      contentCheck: not-configured
+

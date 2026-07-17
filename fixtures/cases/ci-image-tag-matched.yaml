@@ -1,0 +1,40 @@
+name: ci-image-tag-matched
+realWorld: true
+registry:
+  policy:
+    apiVersion: gatekeeper/v1
+    lanes: { human: { type: human-approval, min: 1, fresh: true } }
+    levels:
+      breaking-review-required:
+        enforcement: block
+        require: { m: 1, lanes: [human] }
+  contracts:
+    - apiVersion: gatekeeper/v1
+      name: ci-image-tag
+      level: breaking-review-required
+      authority:
+        repo: org/app
+        paths: [".github/workflows/**"]
+        if_content: 'image:\s+ghcr\.io/org/app:v\d+'
+input:
+  repo: org/app
+  actor: alice
+  changedFiles:
+    - path: .github/workflows/release.yml
+      status: M
+      patch: |-
+        --- a/.github/workflows/release.yml
+        +++ b/.github/workflows/release.yml
+        @@ -3 +3 @@
+        -  image: ghcr.io/org/app:v1
+        +  image: ghcr.io/org/app:v2
+expected:
+  decision: block
+  touched: [ci-image-tag]
+  forbiddenEdits: []
+  fileChecks:
+    - contract: ci-image-tag
+      path: .github/workflows/release.yml
+      matchedPath: .github/workflows/release.yml
+      matchedGlob: ".github/workflows/**"
+      contentCheck: matched

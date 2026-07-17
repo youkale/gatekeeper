@@ -1,0 +1,24 @@
+name: notify-only-hit
+registry:
+  policy:
+    apiVersion: gatekeeper/v1
+    lanes: {}
+    levels:
+      notify-only:
+        enforcement: warn
+        require: {}
+  contracts:
+    - apiVersion: gatekeeper/v1
+      name: release-notes
+      level: notify-only
+      authority: { repo: org/app, paths: ["CHANGELOG.md"] }
+input:
+  repo: org/app
+  changedFiles: [{ path: "CHANGELOG.md", status: M }]
+expected:
+  decision: warn
+  touched: [release-notes]
+  forbiddenEdits: []
+  levels: { release-notes: notify-only }
+  enforcement: { release-notes: warn }
+  effectiveEnforcement: { release-notes: warn }

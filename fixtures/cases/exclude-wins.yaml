@@ -1,0 +1,25 @@
+name: exclude-wins
+registry:
+  policy:
+    apiVersion: gatekeeper/v1
+    lanes: { human: { type: human-approval, min: 1, fresh: true } }
+    levels:
+      breaking-review-required:
+        enforcement: block
+        require: { m: 1, lanes: [human] }
+  contracts:
+    - apiVersion: gatekeeper/v1
+      name: docs-contract
+      level: breaking-review-required
+      authority:
+        repo: org/docs
+        paths: ["docs/**"]
+        exclude: ["**/fixtures/**"]
+input:
+  repo: org/docs
+  changedFiles: [{ path: "docs/fixtures/example.md", status: M }]
+expected:
+  decision: pass
+  touched: []
+  forbiddenEdits: []
+

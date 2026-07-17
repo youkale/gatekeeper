@@ -1,0 +1,30 @@
+name: enforcement-override-forbidden-stays-block
+registry:
+  policy:
+    apiVersion: gatekeeper/v1
+    lanes: { human: { type: human-approval, min: 1, fresh: true } }
+    levels:
+      breaking-review-required:
+        enforcement: block
+        require: { m: 1, lanes: [human] }
+    adoption: { enforcement_override: warn }
+  contracts:
+    - apiVersion: gatekeeper/v1
+      name: frozen-sdk
+      level: breaking-review-required
+      authority: { repo: org/sdk-source, paths: ["api/**"] }
+      consumers:
+        - repo: org/app
+          paths: ["vendor/sdk/**"]
+          role: mirror-frozen
+          allow_actors: ["sdk-sync[bot]"]
+input:
+  repo: org/app
+  actor: alice
+  changedFiles: [{ path: "vendor/sdk/client.ts", status: M }]
+expected:
+  decision: block
+  touched: [frozen-sdk]
+  forbiddenEdits: [frozen-sdk]
+  effectiveEnforcement: { frozen-sdk: warn }
+

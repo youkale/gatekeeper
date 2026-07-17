@@ -1,0 +1,30 @@
+name: manuals-sync-human-forbidden
+registry:
+  policy:
+    apiVersion: gatekeeper/v1
+    lanes: {}
+    levels:
+      notify-only:
+        enforcement: warn
+        require: {}
+  contracts:
+    - apiVersion: gatekeeper/v1
+      name: manuals-sync
+      level: notify-only
+      authority:
+        repo: org/manufacturer
+        paths: ["manuals/**"]
+      consumers:
+        - repo: org/agent
+          paths: ["manufacturer/**"]
+          role: mirror-frozen
+          allow_actors: ["manuals-sync[bot]"]
+input:
+  repo: org/agent
+  actor: alice
+  changedFiles: [{ path: "manufacturer/wangdian/README.md", status: M }]
+expected:
+  decision: block
+  touched: [manuals-sync]
+  forbiddenEdits: [manuals-sync]
+

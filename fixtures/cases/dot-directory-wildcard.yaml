@@ -1,0 +1,29 @@
+name: dot-directory-wildcard
+registry:
+  policy:
+    apiVersion: gatekeeper/v1
+    lanes: {}
+    levels:
+      notify-only:
+        enforcement: warn
+        require: {}
+  contracts:
+    - apiVersion: gatekeeper/v1
+      name: dot-directory
+      level: notify-only
+      authority:
+        repo: org/app
+        paths: ["**/workflows/**"]
+input:
+  repo: org/app
+  changedFiles: [{ path: ".github/workflows/check.yml", status: M }]
+expected:
+  decision: warn
+  touched: [dot-directory]
+  forbiddenEdits: []
+  fileChecks:
+    - contract: dot-directory
+      path: .github/workflows/check.yml
+      matchedPath: .github/workflows/check.yml
+      matchedGlob: "**/workflows/**"
+      contentCheck: not-configured
