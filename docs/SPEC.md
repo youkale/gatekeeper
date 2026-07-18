@@ -548,3 +548,7 @@ consumers:
 ```
 
 An edit by `manuals-sync[bot]` matches the notify-only contract and yields `warn` without a forbidden edit. The same edit by `alice` emits a forbidden edit and yields `block`, even though the level is warn-only.
+
+## Revision history
+
+- 2026-07-18 — v1 initial normative release. Trigger-model revision same day: `pull_request_review` removed from trusted gate triggers (workflow definitions load from the PR merge commit for that event); required-check deployment guidance moved to ruleset-pinned workflows. See `tasks/LESSONS.md` in the repository for the full evidence trail.
