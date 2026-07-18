@@ -6,10 +6,10 @@ import { describe, expect, it } from "vitest";
 
 import {
 	defaultRolesPolicyPath,
-	loadPiProviderAvailability,
 	loadRolesPolicy,
 	type PiProviderAvailability,
 	parseRolesPolicy,
+	piRuntimeAvailability,
 	type RolesPolicy,
 	RolesPolicyParseError,
 	RolesPolicyReadError,
@@ -138,7 +138,7 @@ describe("loadRolesPolicy", () => {
 	});
 });
 
-describe("loadPiProviderAvailability", () => {
+describe("piRuntimeAvailability", () => {
 	it("reads auth.json vendors and an optional models.json manifest (real pi providers.<vendor>.models[].id shape)", async () => {
 		const files: Record<string, string> = {
 			"/pi/auth.json": JSON.stringify({ anthropic: { apiKey: "x" }, openai: { apiKey: "y" }, xai: {} }),
@@ -149,7 +149,7 @@ describe("loadPiProviderAvailability", () => {
 				},
 			}),
 		};
-		const availability = await loadPiProviderAvailability({
+		const availability = await piRuntimeAvailability({
 			piConfigDir: "/pi",
 			readFile: async (filePath) => {
 				const content = files[filePath];
@@ -184,7 +184,7 @@ describe("loadPiProviderAvailability", () => {
   },
 }`,
 		};
-		const availability = await loadPiProviderAvailability({
+		const availability = await piRuntimeAvailability({
 			piConfigDir: "/pi",
 			readFile: async (filePath) => {
 				const content = files[filePath];
@@ -199,7 +199,7 @@ describe("loadPiProviderAvailability", () => {
 	});
 
 	it("degrades authKnown (and known, since models.json is also absent) to false when auth.json is unreadable", async () => {
-		const availability = await loadPiProviderAvailability({
+		const availability = await piRuntimeAvailability({
 			piConfigDir: "/pi",
 			readFile: async () => {
 				throw new Error("ENOENT");
@@ -213,7 +213,7 @@ describe("loadPiProviderAvailability", () => {
 	});
 
 	it("degrades authKnown to false when auth.json is malformed JSON (models.json unaffected -- read independently)", async () => {
-		const availability = await loadPiProviderAvailability({
+		const availability = await piRuntimeAvailability({
 			piConfigDir: "/pi",
 			readFile: async (filePath) => {
 				if (filePath === "/pi/auth.json") {
@@ -228,7 +228,7 @@ describe("loadPiProviderAvailability", () => {
 	});
 
 	it("degrades authKnown to false when auth.json is not a JSON object (models.json unaffected -- read independently)", async () => {
-		const availability = await loadPiProviderAvailability({
+		const availability = await piRuntimeAvailability({
 			piConfigDir: "/pi",
 			readFile: async (filePath) => {
 				if (filePath === "/pi/auth.json") {
@@ -243,7 +243,7 @@ describe("loadPiProviderAvailability", () => {
 	});
 
 	it("tolerates a missing or invalid models.json (falls back to vendor-only inference)", async () => {
-		const availability = await loadPiProviderAvailability({
+		const availability = await piRuntimeAvailability({
 			piConfigDir: "/pi",
 			readFile: async (filePath) => {
 				if (filePath === "/pi/auth.json") {
@@ -263,7 +263,7 @@ describe("loadPiProviderAvailability", () => {
 		// Smoke-test the default path composition without touching the real home directory:
 		// an injected readFile records which paths it was asked for.
 		const requested: string[] = [];
-		await loadPiProviderAvailability({
+		await piRuntimeAvailability({
 			readFile: async (filePath) => {
 				requested.push(filePath);
 				throw new Error("ENOENT");
@@ -278,7 +278,7 @@ describe("loadPiProviderAvailability", () => {
 				"/pi/models.json": JSON.stringify({ providers: { acme: { models: [{ id: "only-model" }] } } }),
 				// auth.json intentionally absent from `files` -- readFile throws ENOENT for it.
 			};
-			const availability = await loadPiProviderAvailability({
+			const availability = await piRuntimeAvailability({
 				piConfigDir: "/pi",
 				readFile: async (filePath) => {
 					const content = files[filePath];
@@ -312,7 +312,7 @@ describe("loadPiProviderAvailability", () => {
 				"/pi/auth.json": JSON.stringify({ anthropic: { apiKey: "x" } }),
 				// models.json intentionally absent -- readFile throws ENOENT for it.
 			};
-			const availability = await loadPiProviderAvailability({
+			const availability = await piRuntimeAvailability({
 				piConfigDir: "/pi",
 				readFile: async (filePath) => {
 					const content = files[filePath];
@@ -341,7 +341,7 @@ describe("loadPiProviderAvailability", () => {
 				"/pi/auth.json": "{not json",
 				"/pi/models.json": JSON.stringify({ providers: { acme: { models: [{ id: "only-model" }] } } }),
 			};
-			const availability = await loadPiProviderAvailability({
+			const availability = await piRuntimeAvailability({
 				piConfigDir: "/pi",
 				readFile: async (filePath) => {
 					const content = files[filePath];
@@ -371,7 +371,7 @@ describe("loadPiProviderAvailability", () => {
 		});
 
 		it("marks every candidate unavailable (with a warning) when both auth.json and models.json are unreadable", async () => {
-			const availability = await loadPiProviderAvailability({
+			const availability = await piRuntimeAvailability({
 				piConfigDir: "/pi",
 				readFile: async () => {
 					throw new Error("ENOENT");

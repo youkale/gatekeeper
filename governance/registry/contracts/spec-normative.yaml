@@ -3,7 +3,7 @@ name: spec-normative
 description: >-
   CLAUDE.md invariant #3: docs/SPEC.md's normative registry-format prose is
   the public standard-face specification, and docs/PLAN.md is the
-  authoritative execution plan referenced by AGENTS.md and the pi-extension
+  authoritative execution plan referenced by AGENTS.md and the integrations/pi
   agent pack. Either document changing is breaking-review-required for every
   document and agent that cites them.
 level: breaking-review-required
@@ -19,6 +19,6 @@ consumers:
     role: consumer
   - repo: youkale/gatekeeper
     paths:
-      - pi-extension/index.ts
-      - pi-extension/agents/registry-reviewer.md
+      - integrations/pi/index.ts
+      - integrations/pi/agents/registry-reviewer.md
     role: consumer

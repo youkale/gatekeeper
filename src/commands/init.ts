@@ -17,7 +17,7 @@ export interface InitOptions {
  * 1. Scan local repo checkouts for candidate contract signals (zero model, zero network).
  * 2. Render the scan into a markdown brief for the registry-drafter role.
  * 3. Write both to --out and print the next-step instruction — drafting/parsing/model
- *    work happens outside this process, in pi-subagents or by hand.
+ *    work happens outside this process, in any coding agent (per docs/roles/) or by hand.
  *
  * `init` is a local authoring tool, not a merge gate: unlike `check`/`gate` it must
  * fail loudly (non-zero exit, structured stderr) on a bad --repos path rather than
@@ -76,8 +76,9 @@ export async function runInit(options: InitOptions, cwd: string): Promise<number
 	process.stdout.write(`  ${scanJsonPath}\n`);
 	process.stdout.write(`  ${briefPath}\n\n`);
 	process.stdout.write(
-		"Next step: in pi, run /gatekeeper-init (or hand init-brief.md to any agent) to draft contracts/policy YAML " +
-			"from the candidates above, then run `gatekeeper validate --registry <dir>` to close the loop.\n",
+		"Next step: hand init-brief.md to any coding agent (Claude Code / Codex / Cursor / pi / ...) running the " +
+			"registry-drafter role per docs/roles/registry-drafter.md (in pi you can also run /gatekeeper-init) to draft " +
+			"contracts/policy YAML from the candidates above, then run `gatekeeper validate --registry <dir>` to close the loop.\n",
 	);
 
 	return 0;

@@ -158,7 +158,14 @@ export async function loadRolesPolicy(filePath: string = defaultRolesPolicyPath(
 	return parseRolesPolicy(content, filePath);
 }
 
-export interface PiProviderAvailability {
+/**
+ * Generic, adapter-agnostic snapshot of what one agent runtime's local config
+ * reports about vendor/model availability. Any runtime adapter (pi today;
+ * others in the future) can produce one of these -- doctor/triage consume
+ * this shape without caring which adapter built it. This module never calls
+ * a model itself, zero-model invariant holds regardless of adapter.
+ */
+export interface RuntimeAvailability {
 	/**
 	 * True when at least one of auth.json/models.json could be read and
 	 * parsed. False only when *both* sources failed -- only then does
@@ -166,7 +173,7 @@ export interface PiProviderAvailability {
 	 * nothing confirmable" rather than making per-candidate confirmed/
 	 * unknown/unavailable decisions from whichever source(s) did work.
 	 * auth.json and models.json are read independently (neither's failure
-	 * short-circuits reading the other) -- see loadPiProviderAvailability.
+	 * short-circuits reading the other) -- see piRuntimeAvailability.
 	 */
 	known: boolean;
 	/** Whether auth.json specifically could be read and parsed as a vendor-credential map. */
@@ -178,14 +185,14 @@ export interface PiProviderAvailability {
 	 * only authKnown false surfaces a `reason`.
 	 */
 	modelsKnown: boolean;
-	/** Vendor ids (the part before "/" in a model id, e.g. "anthropic") that pi has credentials configured for. Empty when authKnown is false. */
+	/** Vendor ids (the part before "/" in a model id, e.g. "anthropic") that the runtime has credentials configured for. Empty when authKnown is false. */
 	vendors: Set<string>;
 	/**
-	 * `vendor/model` ids explicitly declared in pi's models.json
+	 * `vendor/model` ids explicitly declared in the runtime's models.json
 	 * (`providers.<vendor>.models[].id`, reassembled as `<vendor>/<id>`).
 	 * This is *additive* confirmation on top of `vendors`, not an exhaustive
-	 * allowlist: pi's built-in provider models are available through
-	 * `vendors` credentials alone and are typically never listed here (see
+	 * allowlist: built-in provider models are available through `vendors`
+	 * credentials alone and are typically never listed here (see
 	 * `candidateStatus`). Undefined when modelsKnown is false.
 	 */
 	models?: Set<string>;
@@ -193,7 +200,23 @@ export interface PiProviderAvailability {
 	reason?: string;
 }
 
-export interface LoadPiProviderAvailabilityOptions {
+/**
+ * Backward-compatible alias: pi is the only concrete adapter shipped today
+ * and its shape happens to be the generic shape. Prefer `RuntimeAvailability`
+ * in new adapter-agnostic code.
+ */
+export type PiProviderAvailability = RuntimeAvailability;
+
+/**
+ * A pluggable source of RuntimeAvailability for one agent runtime. Any future
+ * adapter (beyond pi) implements a function of this shape; `piRuntimeAvailability`
+ * below is the default (and, today, only shipped) implementation.
+ */
+export type RuntimeAvailabilityProvider<TOptions = Record<string, unknown>> = (
+	options?: TOptions,
+) => Promise<RuntimeAvailability>;
+
+export interface PiRuntimeAvailabilityOptions {
 	/** Defaults to ~/.pi/agent. Injectable so tests never touch the real home directory. */
 	piConfigDir?: string;
 	/** Injectable file reader for fixture-backed tests. */
@@ -343,19 +366,24 @@ function extractConfirmedModelIds(value: unknown): Set<string> {
 }
 
 /**
- * Read pi's local auth/model manifests under `~/.pi/agent/`. `auth.json` is
- * a `{ "<vendor>": <truthy credential> }` map (pi's documented shape).
+ * Default RuntimeAvailabilityProvider: reads pi's local auth/model manifests
+ * under `~/.pi/agent/`. `auth.json` is a `{ "<vendor>": <truthy credential> }`
+ * map (pi's documented shape). pi is the only agent runtime this repo ships
+ * an adapter for today; other runtimes (Claude Code, Codex, Cursor, ...) can
+ * plug in their own RuntimeAvailabilityProvider without doctor/triage caring
+ * which one produced the snapshot -- an unresolvable/unknown runtime just
+ * degrades to `known: false` the same way an unreadable pi config does.
  *
  * auth.json and models.json are read and parsed **independently** -- a
  * broken/missing/unreadable auth.json must never prevent models.json's
  * confirmations from being honored (and models.json's absence, which is
  * normal since it's optional, must never suppress vendor-credential
- * availability). Provider availability is advisory input for a
+ * availability). Runtime availability is advisory input for a
  * briefing/doctor check, never a merge gate, so neither file failing throws.
  */
-export async function loadPiProviderAvailability(
-	options: LoadPiProviderAvailabilityOptions = {},
-): Promise<PiProviderAvailability> {
+export const piRuntimeAvailability: RuntimeAvailabilityProvider<PiRuntimeAvailabilityOptions> = async (
+	options = {},
+) => {
 	const dir = options.piConfigDir ?? path.join(homedir(), ".pi", "agent");
 	const readTextFile = options.readFile ?? ((filePath: string) => readFile(filePath, "utf8"));
 	const authPath = path.join(dir, "auth.json");
@@ -399,7 +427,7 @@ export async function loadPiProviderAvailability(
 		...(models ? { models } : {}),
 		...(reason ? { reason } : {}),
 	};
-}
+};
 
 /**
  * A vendor credential in auth.json only proves pi *can* reach that vendor --
@@ -424,7 +452,7 @@ export interface TierModelSelection {
 	prefer: string[];
 	requestedCount: number;
 	crossVendor: boolean;
-	/** Whether provider availability could be determined at all (see PiProviderAvailability.known). */
+	/** Whether runtime availability could be determined at all (see RuntimeAvailability.known). */
 	availabilityKnown: boolean;
 	/** Chosen models, in preference order, up to requestedCount. Empty when availabilityKnown is false. */
 	selected: TierModelCandidate[];
@@ -445,7 +473,7 @@ type CandidateStatusResult = ModelConfirmationStatus | "unavailable";
  * candidate selectable, just unconfirmed (unknown); only when neither signal
  * backs it is the candidate excluded entirely (unavailable).
  */
-function candidateStatus(modelId: string, availability: PiProviderAvailability): CandidateStatusResult {
+function candidateStatus(modelId: string, availability: RuntimeAvailability): CandidateStatusResult {
 	if (availability.models?.has(modelId)) {
 		return "confirmed";
 	}
@@ -459,7 +487,7 @@ function candidateStatus(modelId: string, availability: PiProviderAvailability):
 export function selectTierModels(
 	tierName: string,
 	tier: RolesPolicyTier,
-	availability: PiProviderAvailability,
+	availability: RuntimeAvailability,
 ): TierModelSelection {
 	const base = {
 		tier: tierName,
@@ -474,7 +502,7 @@ export function selectTierModels(
 			availabilityKnown: false,
 			selected: [],
 			warnings: [
-				`cannot confirm available models (${availability.reason ?? "pi config unreadable"}); showing preference order only -- verify manually`,
+				`cannot confirm available models (${availability.reason ?? "agent runtime config unreadable"}); showing preference order only -- verify manually`,
 			],
 		};
 	}
@@ -518,7 +546,7 @@ export function selectTierModels(
 	const warnings: string[] = [];
 	if (selected.length === 0) {
 		warnings.push(
-			`${tierName} tier has no available model under the current pi config (preference: ${tier.prefer.join(" > ")})`,
+			`${tierName} tier has no available model under the current agent runtime config (preference: ${tier.prefer.join(" > ")})`,
 		);
 	} else if (selected.length < tier.count) {
 		warnings.push(`${tierName} tier has only ${selected.length}/${tier.count} available model(s)`);
@@ -541,6 +569,6 @@ export function selectTierModels(
 }
 
 /** Convenience: resolve every tier in a roles-policy against one availability snapshot. Pure -- no I/O. */
-export function selectAllTiers(policy: RolesPolicy, availability: PiProviderAvailability): TierModelSelection[] {
+export function selectAllTiers(policy: RolesPolicy, availability: RuntimeAvailability): TierModelSelection[] {
 	return Object.entries(policy.tiers).map(([name, tier]) => selectTierModels(name, tier, availability));
 }

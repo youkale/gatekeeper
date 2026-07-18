@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 产品不变量（对所有 agent 的明文强制规范）
 
 1. **引擎纯函数区**：`src/engine/` 禁止 I/O、网络、环境变量、随机数、时钟依赖。
-2. **产品本体零模型**：整个 `src/` 禁止引入 LLM/模型调用依赖；LLM 工作全部委托 pi-subagents 角色（角色定义在 `pi-extension/agents/`）。
+2. **产品本体零模型**：整个 `src/` 禁止引入 LLM/模型调用依赖；LLM 工作全部委托外部 agent 角色（任何 coding agent，角色卡见 `docs/roles/`；`integrations/pi/agents/` 是其中一个厂商适配器示例）。
 3. **对外标准面**（改动一律按复杂处理，须评估向后兼容）：contract/policy 的 schema（`src/engine/schema.ts` + `schema/*.json`）、verdict JSON 结构、sticky comment 台账块格式、`action.yml` 输入、`docs/SPEC.md` 规范性内容。
 4. **fail 方向铁律**：判定缺陷 fail-closed（阻塞），基础设施故障 fail-open（exit 0 + 警告）——方向弄反是最高优先级 blocker。
 5. Fork PR 安全不变量：gate/check 流程永不 checkout / 执行 PR 头部代码。

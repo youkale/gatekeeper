@@ -10,8 +10,8 @@ import { RegistryReadError } from "../providers/fsregistry.js";
 import { GitDiffError, resolveRepo } from "../providers/gitdiff.js";
 import { GitHubProvider, type GitHubProviderOptions, InfraError } from "../providers/github.js";
 import {
-	loadPiProviderAvailability,
 	loadRolesPolicy,
+	piRuntimeAvailability,
 	RolesPolicyParseError,
 	RolesPolicyReadError,
 	resolveRolesPolicyPath,
@@ -274,7 +274,11 @@ export interface RolesPolicyCapabilityOptions {
 
 /**
  * Builds the M6 roles-policy capability check: does each tier in
- * roles-policy.yaml have an available model under the current pi config?
+ * roles-policy.yaml have an available model under the current agent runtime
+ * config? Availability is sourced from a pluggable RuntimeAvailabilityProvider
+ * (see src/roles/policy.ts) -- `piRuntimeAvailability` is the only shipped
+ * implementation today; other agent runtimes are unknown-but-non-blocking
+ * until they get their own provider.
  *
  * Path resolution: prefer a consuming repo's own `<cwd>/roles-policy.yaml`
  * override; fall back to the package-shipped `roles-policy.yaml`
@@ -288,10 +292,10 @@ export interface RolesPolicyCapabilityOptions {
  * unknown) is an error -- nothing downstream of triage can produce a
  * judgement without it. Selections that exist but are all
  * model-level-unconfirmed (vendor credentialed only, no models.json
- * confirmation) are a warning, not an error or a silent OK: pi being logged
+ * confirmation) are a warning, not an error or a silent OK: being logged
  * into a vendor does not prove that exact model id actually works. Every
- * other tier gap, and an unreadable pi config, is only a warning (fail-open
- * -- roles-policy availability is advisory, not a merge gate).
+ * other tier gap, and an unreadable agent runtime config, is only a warning
+ * (fail-open -- roles-policy availability is advisory, not a merge gate).
  */
 export function rolesPolicyCapabilityCheck(
 	cwd: string,
@@ -315,17 +319,19 @@ export function rolesPolicyCapabilityCheck(
 				throw error;
 			}
 
-			const availability = await loadPiProviderAvailability({ piConfigDir: options.piConfigDir });
+			const availability = await piRuntimeAvailability({ piConfigDir: options.piConfigDir });
 			const warnings: string[] = [];
 			const errors: string[] = [];
-			// auth.json and models.json are read independently (see loadPiProviderAvailability):
+			// auth.json and models.json are read independently (see piRuntimeAvailability):
 			// authKnown false is worth its own warning even when modelsKnown is true (models.json
 			// confirmations still apply, but vendor-credentialed "unknown" picks cannot be made).
 			if (!availability.authKnown) {
 				const suffix = availability.modelsKnown
 					? "；models.json 的显式确认仍生效，但无法识别仅凭厂商凭据可用的模型"
 					: "；仅能展示 roles-policy 偏好序，无法确认可用模型";
-				warnings.push(`无法读取 pi 认证配置 (${availability.reason ?? "unknown"})${suffix}`);
+				warnings.push(
+					`无法读取 agent runtime 配置（当前支持 pi；其他运行时可用性未知不阻塞） (${availability.reason ?? "unknown"})${suffix}`,
+				);
 			}
 			for (const selection of selectAllTiers(policy, availability)) {
 				const isDeepReasoner = selection.tier === "deep-reasoner";

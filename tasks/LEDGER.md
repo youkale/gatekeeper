@@ -20,6 +20,8 @@
 | T-20260718-10 | 清债 | doctor 触发器 lint + registry 错误累积 + hint 文案 + selfgate workflow_dispatch | sonnet-coder | R1: claude(opus) FAIL(1 默认 mode 枚举) + grok PASS(4nb 采 1)→处方修复+文案补齐 | ✅ 验收提交 | records/T-20260718-10-11-debt-clearing.md |
 | T-20260718-11 | 清债 | review 事件中继（workflow_run 桥接）——codex 内审自阻+裁决降级 best-effort | codex | codex 内部双审 FAIL→BLOCKED_REDESIGN→调度者裁决选项2（诚实降级）；外部 claude(opus)/grok 双审该实现 PASS | ✅ 验收提交 | records/T-20260718-10-11-debt-clearing.md |
 
+| T-20260719-01 | 中立化 | agent 绑定纠偏 A：integrations/pi 迁移 + docs/roles 角色卡 + RuntimeAvailabilityProvider 解耦 + 全面文案中立 | sonnet-coder | R1: claude PASS + grok PASS（共 6 nb，4 项润色验收时落实） | ✅ 验收提交 | records/T-20260719-01-agent-neutrality.md |
+
 ### 遗留债队列（活动，v1.1 候选）
 
 - [v1.1] enforce: hard 的真实前置：受信外部通道（GitHub App/webhook → repository_dispatch 触发默认分支 workflow）——workflow_run 桥接已实现但可被 PR 压制脉冲，仅 best-effort（T-11 裁决结论）

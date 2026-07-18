@@ -14,8 +14,8 @@ import type {
 	GatekeeperCheckParams,
 	ToolDefinition,
 	ToolResult,
-} from "../pi-extension/index.js";
-import gatekeeperExtension, { runGatekeeperCheck } from "../pi-extension/index.js";
+} from "../integrations/pi/index.js";
+import gatekeeperExtension, { runGatekeeperCheck } from "../integrations/pi/index.js";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 
@@ -74,7 +74,7 @@ function createMockApi(): {
 	return { api, tools, commands, registerTool, registerCommand };
 }
 
-describe("pi-extension registration", () => {
+describe("integrations/pi registration", () => {
 	it("registers gatekeeper_check tool and init/triage commands", () => {
 		const { api, registerTool, registerCommand, tools, commands } = createMockApi();
 
@@ -112,7 +112,7 @@ describe("pi-extension registration", () => {
 	});
 });
 
-describe("pi-extension gatekeeper_check execute", () => {
+describe("integrations/pi gatekeeper_check execute", () => {
 	let tmpBase: string;
 	let registryDir: string;
 	let repoDir: string;

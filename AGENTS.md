@@ -9,7 +9,7 @@ Gatekeeper: a contract registry standard + deterministic diff verdict engine + P
 ## Hard invariants (violations are top-priority blockers)
 
 1. **Pure-engine zone**: `src/engine/` must stay free of I/O, network, env vars, randomness, and clock access.
-2. **Zero model calls in product code**: nothing under `src/` may depend on any LLM/model API. LLM work is delegated to pi-subagents roles defined in `pi-extension/agents/`.
+2. **Zero model calls in product code**: nothing under `src/` may depend on any LLM/model API. LLM work is delegated to external agent roles (any coding agent) using the vendor-neutral role cards in `docs/roles/`; `integrations/pi/agents/` is one adapter example.
 3. **Public standard surface** — treat any change as breaking-review-required and do not modify without an explicit task mandate: contract/policy schema (`src/engine/schema.ts`, `docs/SPEC.md` normative text), verdict JSON shape, sticky-comment ledger block format, `action.yml` inputs.
 4. **Fail-direction law**: verdict defects fail **closed** (block); infrastructure faults fail **open** (exit 0 + loud warning). Reversing a direction is the highest-severity bug class.
 5. **Fork-PR safety**: gate/check flows never check out or execute PR head code.

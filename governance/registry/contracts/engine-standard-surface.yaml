@@ -18,7 +18,7 @@ authority:
 consumers:
   - repo: youkale/gatekeeper
     paths:
-      - pi-extension/index.ts
+      - integrations/pi/index.ts
     role: consumer
     verify: npm test
   - repo: youkale/gatekeeper

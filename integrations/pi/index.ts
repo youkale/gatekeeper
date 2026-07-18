@@ -1,6 +1,6 @@
 /**
  * Gatekeeper pi extension — thin wrapper over the main-package engine.
- * All matching / verdict logic lives in ../src; this file only registers
+ * All matching / verdict logic lives in ../../src; this file only registers
  * tools/commands and assembles provider + engine calls.
  */
 
@@ -15,11 +15,11 @@ import type {
 	ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 
-import { formatRegistryIssue, RegistryParseError } from "../src/engine/registry.js";
-import type { Verdict } from "../src/engine/types.js";
-import { evaluate } from "../src/engine/verdict.js";
-import { LanePresetParseError, LanePresetReadError, loadRegistryWithLanePresets } from "../src/gate/presets.js";
-import { RegistryReadError } from "../src/providers/fsregistry.js";
+import { formatRegistryIssue, RegistryParseError } from "../../src/engine/registry.js";
+import type { Verdict } from "../../src/engine/types.js";
+import { evaluate } from "../../src/engine/verdict.js";
+import { LanePresetParseError, LanePresetReadError, loadRegistryWithLanePresets } from "../../src/gate/presets.js";
+import { RegistryReadError } from "../../src/providers/fsregistry.js";
 import {
 	attachPatches,
 	GitDiffError,
@@ -27,10 +27,10 @@ import {
 	resolveActor,
 	resolveBaseRef,
 	resolveRepo,
-} from "../src/providers/gitdiff.js";
-import { renderExplain, renderSummary, renderVerdictJson } from "../src/render/explain.js";
+} from "../../src/providers/gitdiff.js";
+import { renderExplain, renderSummary, renderVerdictJson } from "../../src/render/explain.js";
 
-// Re-export host types for tests and consumers (resolvable via pi-extension devDependency).
+// Re-export host types for tests and consumers (resolvable via this package's devDependency).
 export type { AgentToolResult, ExtensionAPI, ExtensionCommandContext, ExtensionContext, ToolDefinition };
 
 /** Alias kept for test readability — same as AgentToolResult (no isError field). */

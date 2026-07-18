@@ -164,38 +164,50 @@ If workflow discovery is unsuitable, repeat `--check-name` for the names that mu
 - Automatic base resolution probes only local `refs/heads/main` and `refs/heads/master`. It does not probe remote-tracking refs. CI should fetch the intended base and pass it explicitly, for example `--base origin/main`.
 - `doctor --workflow <path>` fails open when an explicitly supplied path does not exist: it prints a warning and exits 0. Treat that as “validation unavailable,” not proof that required-check wiring is healthy. Use a valid path or explicit `--check-name` values in deployment verification.
 
-## Pi integration
+## Agent integrations
 
-The `pi-extension/` package adds a local `gatekeeper_check` tool, `/gatekeeper-init` and `/gatekeeper-triage` guide commands, and a pi-subagents role pack. It is a thin wrapper around the same registry loader, Git diff provider, and verdict engine; it does not duplicate policy logic.
+Gatekeeper's product core makes zero model calls (see "Govern structure, not capability" above). Any drafting/judgment work an agent needs to do is defined once, vendor-neutrally, and any coding agent can pick it up — pi is one example adapter, not a requirement.
 
-The supported local installation is:
+### Role cards (vendor-neutral)
 
-```bash
-pi install /absolute/path/to/gatekeeper/pi-extension
-```
-
-For extension development from this checkout:
-
-```bash
-pi -e ./pi-extension/index.ts
-```
-
-An npm install of `pi-gatekeeper` is not yet self-contained because the extension currently imports the parent checkout's `src/` modules. Use a trusted local path or development load until packaging includes those dependencies.
-
-The role pack contains:
+[`docs/roles/`](docs/roles/) holds the canonical role specifications:
 
 - `contract-scout`: collect single-repository contract facts without drafting policy.
 - `registry-drafter`: turn grounded facts into `contracts/*.yaml`.
 - `registry-reviewer`: review registry drafts against the public specification.
 - `deep-reasoner`: make the issue requirement-gate judgment and dispatch plan.
 
-The package-level `roles-policy.yaml` defines data-only model tiers:
+Each file is plain markdown you can hand to Claude Code, Codex, Cursor, pi, or any other coding agent as a subagent/system-prompt definition. `gatekeeper init` and `gatekeeper triage` print next-step guidance pointing at these files instead of assuming a specific agent runtime.
+
+The repo-root `roles-policy.yaml` defines data-only model tiers consumed by these roles:
 
 - `deep-reasoner` lists the preferred judgment models in order.
 - `coder` lists implementation-model preferences.
 - `reviewer` defaults to two reviewers and prefers cross-vendor selection.
 
-Gatekeeper intersects those preferences with the providers/models visible in the local pi configuration. `doctor` reports tier gaps; `triage` uses the resolved candidates in its briefing and validates the posted reviewer count. The policy selects dispatch candidates but never invokes a model itself.
+Gatekeeper intersects those preferences with whatever agent-runtime availability it can detect (a pluggable `RuntimeAvailabilityProvider`; pi's local config is the only one shipped today, other runtimes degrade to "unknown, non-blocking"). `doctor` reports tier gaps; `triage` uses the resolved candidates in its briefing and validates the posted reviewer count. The policy selects dispatch candidates but never invokes a model itself.
+
+### MCP server (planned)
+
+A Model Context Protocol server exposing `gatekeeper_check` and the role briefings to any MCP-capable agent is planned as a second, host-agnostic integration surface. Not yet implemented.
+
+### pi extension (example adapter)
+
+The [`integrations/pi/`](integrations/pi/) package is a concrete example of wiring the role cards above into one specific agent runtime: it adds a local `gatekeeper_check` tool, `/gatekeeper-init` and `/gatekeeper-triage` guide commands, and thin pi-subagents shells over `docs/roles/`. It is a thin wrapper around the same registry loader, Git diff provider, and verdict engine; it does not duplicate policy logic.
+
+The supported local installation is:
+
+```bash
+pi install /absolute/path/to/gatekeeper/integrations/pi
+```
+
+For extension development from this checkout:
+
+```bash
+pi -e ./integrations/pi/index.ts
+```
+
+An npm install of `pi-gatekeeper` is not yet self-contained because the extension currently imports the parent checkout's `src/` modules. Use a trusted local path or development load until packaging includes those dependencies.
 
 ## The fail-direction commitment
 

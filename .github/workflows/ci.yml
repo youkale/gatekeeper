@@ -43,11 +43,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # pi-extension is a separate package; its type-only devDependency
-      # (@earendil-works/pi-coding-agent) lives in its own package.json and is
-      # required by the root typecheck (tests import pi-extension/index.ts).
-      - name: Install pi-extension dependencies
-        run: npm ci --prefix pi-extension
+      # integrations/pi is a separate package (one example agent adapter);
+      # its type-only devDependency (@earendil-works/pi-coding-agent) lives in
+      # its own package.json and is required by the root typecheck (tests
+      # import integrations/pi/index.ts).
+      - name: Install integrations/pi dependencies
+        run: npm ci --prefix integrations/pi
 
       - name: Typecheck
         run: npm run typecheck
@@ -56,7 +57,7 @@ jobs:
         run: npm test
 
       - name: Lint (biome)
-        run: npx biome check src tests scripts
+        run: npx biome check src tests scripts integrations
 
       - name: Governance ledger checker
         run: npm run check:governance

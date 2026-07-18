@@ -19,8 +19,8 @@ import {
 } from "../render/triage.js";
 import type { TierModelSelection } from "../roles/policy.js";
 import {
-	loadPiProviderAvailability,
 	loadRolesPolicy,
+	piRuntimeAvailability,
 	resolveRolesPolicyPath,
 	selectAllTiers,
 	vendorOfModelId,
@@ -250,7 +250,7 @@ async function resolveTierSelections(
 	try {
 		const rolesPolicyPath = resolveRolesPolicyPath(cwd, dependencies.rolesPolicyPath);
 		const policy = await loadRolesPolicy(rolesPolicyPath);
-		const availability = await loadPiProviderAvailability({ piConfigDir: dependencies.piConfigDir });
+		const availability = await piRuntimeAvailability({ piConfigDir: dependencies.piConfigDir });
 		return { tiers: selectAllTiers(policy, availability) };
 	} catch (error) {
 		return { tiers: [], warning: error instanceof Error ? error.message : String(error) };

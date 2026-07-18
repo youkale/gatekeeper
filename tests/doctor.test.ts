@@ -393,7 +393,7 @@ describe("rolesPolicyCapabilityCheck", () => {
 		const result = await check.run();
 
 		expect(result.errors ?? []).toEqual([]);
-		expect(result.warnings?.some((warning) => warning.includes("无法读取 pi 认证配置"))).toBe(true);
+		expect(result.warnings?.some((warning) => warning.includes("无法读取 agent runtime 配置"))).toBe(true);
 		expect(result.warnings?.some((warning) => warning.includes("无法读取 roles-policy"))).toBe(false);
 		// The shipped file declares three tiers; each contributes its own warning when
 		// availability is unknown, proving the real multi-tier file was actually loaded
@@ -562,11 +562,11 @@ tiers:
 		const check = rolesPolicyCapabilityCheck(cwd, { piConfigDir });
 		const result = await check.run();
 
-		// Before the fix, loadPiProviderAvailability's early return on the missing auth.json
+		// Before the fix, piRuntimeAvailability's early return on the missing auth.json
 		// meant models.json was never even read, so deep-reasoner would have zero selections
 		// and wrongly escalate to an error here.
 		expect(result.errors ?? []).toEqual([]);
-		expect(result.warnings?.some((warning) => warning.includes("无法读取 pi 认证配置"))).toBe(true);
+		expect(result.warnings?.some((warning) => warning.includes("无法读取 agent runtime 配置"))).toBe(true);
 		expect(result.warnings?.some((warning) => warning.includes("models.json 的显式确认仍生效"))).toBe(true);
 		expect(result.warnings?.some((warning) => warning.includes("model-level-unconfirmed"))).toBe(false);
 		expect(result.warnings?.some((warning) => warning.includes("no available model"))).toBe(false);

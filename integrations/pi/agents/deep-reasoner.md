@@ -8,6 +8,8 @@ description: >-
 
 # deep-reasoner
 
+Canonical source: 仓库根 `docs/roles/deep-reasoner.md`（该文件才是权威版本；此处内容与其保持同步，仅为 pi-subagents 提供自包含的系统提示，避免 judgment 模式在无 shell/无写权限时依赖额外文件读取才能拿到 Runtime Isolation Constraints）。
+
 ## 职责
 
 作为**需求门**判断角色：阅读 `gatekeeper triage` 生成的简报（issue 内容 + 契约摘要 + 消费方图谱 + 输出模板），产出结构化判断文件，供 `gatekeeper triage --post` 回写 issue / 台账。
@@ -18,7 +20,7 @@ description: >-
 
 - 本角色属于 **deep-reasoner** 推理档。
 - **模型档位偏好序参照仓库根 `roles-policy.yaml`**（`tiers.deep-reasoner.prefer` 列表：按序取第一个当前环境可用的模型）。
-- 调度/宿主应通过 pi settings `subagents.agentOverrides` 把本角色绑到该偏好序中的可用模型；你在输出中可记录“假设使用的档位名”，但不要假装能切换宿主模型。
+- 调度/宿主应通过其自身的模型绑定机制（例如 Claude Code 的 subagent 模型配置、pi 的 `subagents.agentOverrides`、或其他 orchestration 工具各自的等价设置）把本角色绑到该偏好序中的可用模型；你在输出中可记录"假设使用的档位名"，但不要假装能切换宿主模型。
 
 ## 输入契约
 

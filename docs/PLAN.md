@@ -11,7 +11,7 @@
 - **TypeScript / Node 20**，与 pi-mono 同栈；工具链对齐 pi-mono 惯例（biome 做 lint/format）。CLI 用 commander（`npx` 零安装），GitHub Action 用 node20 runtime + tsup 打包的 dist。
 - 依赖极薄：`yaml`、`zod`、`picomatch`、`commander`；GitHub REST 用内置 fetch（自己处理分页），不引 octokit。
 - **模型策略（用户拍板）：Gatekeeper 产品本体零模型调用，所有 LLM 工作委托给 pi + pi-subagents 的角色 agent**。模型多厂商、按角色绑定，全部由 pi 的 settings 管理（`subagents.agentOverrides` 每角色可指定不同模型）。Gatekeeper 交付的是**角色定义 + 任务简报 + 确定性验证闭环**，不是模型客户端——这让"核心零模型"从目录约定升级为产品全局事实。
-- **agent 侧集成 = pi extension + 角色包**（替代原计划的 MCP 快速跟进）：薄插件包装引擎——注册 `gatekeeper_check` 工具供 agent 查询契约命中；随包发布 gatekeeper 角色 agent 定义（见 init 设计）。放在 `pi-extension/`，复用核心库，不引入新逻辑。
+- **agent 侧集成 = pi extension + 角色包**（替代原计划的 MCP 快速跟进）：薄插件包装引擎——注册 `gatekeeper_check` 工具供 agent 查询契约命中；随包发布 gatekeeper 角色 agent 定义（见 init 设计）。放在 `pi-extension/`，复用核心库，不引入新逻辑。**[2026-07-19 勘误]** 用户决策修正：Gatekeeper 产出的程序必须任何 coding agent 都能用，pi 不再是唯一集成路径而降为普通适配器之一。角色定义正文迁移为厂商中立的 `docs/roles/*.md` role card（可直接用作 Claude Code subagent、pi-subagents agent、或任何 agent 的系统提示）；原 `pi-extension/` 整体迁移为 `integrations/pi/`，其 `agents/*.md` 瘦身为指向 `docs/roles/` 的薄壳。`src/roles/policy.ts` 的 provider 可用性读取重构为可插拔的 `RuntimeAvailabilityProvider` 概念，`piRuntimeAvailability` 只是其默认实现。详见 `README.md`「Agent integrations」章与 `tasks/records/`。
 - **核心引擎纯函数**：输入 `{changed files（含 status/oldPath/patch）, registry, repo 身份}` → 输出带完整判定溯源的 verdict 对象。git diff 和 PR API 只是两个数据提供者。
 
 ## 注册表格式（开源标准，最重要的产出）
@@ -91,7 +91,7 @@ gatekeeper/
     commands/      # check gate validate doctor audit stats init triage
     init/          # 确定性部分：扫描清单生成 + 任务简报 + 草稿验证（无模型调用）
     cli.ts  action.ts
-  pi-extension/    # pi 插件：gatekeeper_check 工具 + /gatekeeper-init 命令
+  integrations/pi/ # （原 pi-extension/，2026-07-19 中立化迁移）pi 适配器：gatekeeper_check 工具 + 引导命令
     agents/        # 角色定义：contract-scout / registry-drafter / registry-reviewer / deep-reasoner
   lanes.d/         # coderabbit.yaml copilot.yaml greptile.yaml human.yaml
   schema/          # contract / policy 的 JSON Schema（发布件，供编辑器校验）
