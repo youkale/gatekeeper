@@ -15,6 +15,8 @@
 
 **MVP 全里程碑（M0–M8）已交付。** 最终状态：298 测试全绿、SPEC/README 落地、真实生态验收通过。
 
+| T-20260718-09 | 治理硬化 | 自身注册表 + 自门禁 workflow + 台账机器检查器（用户提出的可移植性/自治四缺口之 ③④） | sonnet-coder | DISPATCH | 进行中 | - |
+
 ### 遗留债队列（活动，v1.1 候选）
 
 - [T-07] pi-extension npm 自包含发布（tarball 打包 ../src）；真实 pi 运行时联调（pi -e / pi install 路径）

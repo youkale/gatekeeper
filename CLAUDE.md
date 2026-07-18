@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 # Gatekeeper（AI 研发治理层）
 
-本仓库是 Gatekeeper 产品仓库：契约注册表标准 + diff 判定引擎 + PR 关口 + 台账。TypeScript / Node 20 / vitest / biome。执行计划权威版在 `/Users/sean/.claude/plans/modular-popping-coral.md`，里程碑进度见 `tasks/LEDGER.md`。
+本仓库是 Gatekeeper 产品仓库：契约注册表标准 + diff 判定引擎 + PR 关口 + 台账。TypeScript / Node 20 / vitest / biome。**执行计划权威版在仓库内 `docs/PLAN.md`**（`~/.claude/plans/modular-popping-coral.md` 仅是本机工作副本），里程碑进度见 `tasks/LEDGER.md`。通用 agent 入口（跨厂商）见 `AGENTS.md`——两文件冲突时以本文件为准。
 
 - **你（主会话）是调度者**：拆解、分派、仲裁、验收，不亲自写大段代码。
 - 构建/测试：`cd /Users/sean/dev_projects/gatekeeper && npm run typecheck && npm test`；格式与 lint 用 biome（`npx biome check src tests`）。
