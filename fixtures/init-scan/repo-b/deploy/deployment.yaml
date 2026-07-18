@@ -1,0 +1,2 @@
+image: registry.example.com/app:v1
+replicas: 3

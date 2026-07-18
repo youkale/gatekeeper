@@ -1,0 +1,12 @@
+name: release
+jobs:
+  build:
+    steps:
+      - run: |
+          image: ghcr.io/org/app:v1
+      - run: |
+          tag: v2
+      - run: |
+          image: ghcr.io/org/app:v3
+      - run: |
+          image: ghcr.io/org/app:v4

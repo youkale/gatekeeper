@@ -1,0 +1,4 @@
+REQUEST_HEADER = "X-Request-Id"
+SERVICE_URL_ENV = "SERVICE_URL"
+ORDERS_PATH = "/api/orders/456"
+IGNORED_HEADER_TEST = "X-Ignored-Header"

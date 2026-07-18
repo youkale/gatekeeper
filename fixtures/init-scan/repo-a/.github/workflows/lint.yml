@@ -1,0 +1,5 @@
+name: lint
+jobs:
+  lint:
+    steps:
+      - run: eslint .
