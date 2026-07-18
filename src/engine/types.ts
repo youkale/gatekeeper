@@ -43,8 +43,19 @@ export interface HumanApprovalLane extends ExtensionFields {
 	fresh: boolean;
 }
 
+export type ReviewState = "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED" | "DISMISSED" | "PENDING";
+
+export interface RegexMatch extends ExtensionFields {
+	pattern: string;
+	ignore_case?: boolean;
+}
+
+export type BodyMatch = string | RegexMatch;
+
 export interface ReviewLanePass extends ExtensionFields {
-	state: "APPROVED";
+	state: ReviewState;
+	body_matches?: BodyMatch;
+	ignore_case?: boolean;
 }
 
 export interface ReviewLane extends ExtensionFields {
@@ -53,7 +64,21 @@ export interface ReviewLane extends ExtensionFields {
 	pass: ReviewLanePass;
 }
 
-export type Lane = HumanApprovalLane | ReviewLane;
+export interface CheckRunLane extends ExtensionFields {
+	type: "check-run";
+	selector?: "check-run" | "status";
+	name: string;
+	pass?: string[];
+}
+
+export interface CommentScanLane extends ExtensionFields {
+	type: "comment-scan";
+	author: string;
+	body_matches: BodyMatch;
+	ignore_case?: boolean;
+}
+
+export type Lane = HumanApprovalLane | ReviewLane | CheckRunLane | CommentScanLane;
 
 export interface LevelRequirement extends ExtensionFields {
 	m?: number;

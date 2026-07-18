@@ -1,5 +1,5 @@
 import type { Dirent } from "node:fs";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 
 /**
@@ -38,11 +38,23 @@ export interface RegistryFileInput {
 
 /**
  * Read `policy.yaml` and every `contracts/*.yaml`/`*.yml` file under `registryDir`
- * into the `{path, content}` shape `parseRegistry` expects. Missing files/directories
- * are not an error here — `parseRegistry` reports the resulting semantic issues
- * (e.g. "exactly one policy.yaml"); only genuine I/O failures throw.
+ * into the `{path, content}` shape `parseRegistry` expects. A missing, unreadable,
+ * or non-directory registry root is an infrastructure error. Missing registry
+ * files inside an existing root remain semantic issues for `parseRegistry`.
  */
 export async function readRegistryFiles(registryDir: string): Promise<RegistryFileInput[]> {
+	let registryMetadata: Awaited<ReturnType<typeof stat>>;
+	try {
+		registryMetadata = await stat(registryDir);
+	} catch (error) {
+		throw new RegistryReadError(`failed to access registry directory ${registryDir}: ${describeIoError(error)}`, {
+			cause: error,
+		});
+	}
+	if (!registryMetadata.isDirectory()) {
+		throw new RegistryReadError(`registry path is not a directory: ${registryDir}`);
+	}
+
 	const files: RegistryFileInput[] = [];
 
 	const policyPath = path.join(registryDir, "policy.yaml");

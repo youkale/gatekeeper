@@ -1,7 +1,8 @@
-import { formatRegistryIssue, parseRegistry, RegistryParseError } from "../engine/registry.js";
+import { formatRegistryIssue, RegistryParseError } from "../engine/registry.js";
 import type { Registry } from "../engine/types.js";
 import { evaluate } from "../engine/verdict.js";
-import { RegistryReadError, readRegistryFiles } from "../providers/fsregistry.js";
+import { LanePresetParseError, LanePresetReadError, loadRegistryWithLanePresets } from "../gate/presets.js";
+import { RegistryReadError } from "../providers/fsregistry.js";
 import {
 	attachPatches,
 	GitDiffError,
@@ -31,6 +32,12 @@ function describeCheckError(error: unknown): string {
 	if (error instanceof RegistryReadError || error instanceof GitDiffError) {
 		return error.reason;
 	}
+	if (error instanceof LanePresetReadError) {
+		return error.reason;
+	}
+	if (error instanceof LanePresetParseError) {
+		return error.issues.map((issue) => `${issue.file} ${issue.path}: ${issue.message}`).join("; ");
+	}
 	return error instanceof Error ? error.message : String(error);
 }
 
@@ -53,9 +60,11 @@ function degrade(reason: string, options: CheckOptions): number {
 
 export async function runCheck(options: CheckOptions, cwd: string): Promise<number> {
 	let registry: Registry;
+	let laneConflicts: Awaited<ReturnType<typeof loadRegistryWithLanePresets>>["conflicts"];
 	try {
-		const files = await readRegistryFiles(options.registry);
-		registry = parseRegistry(files);
+		const loaded = await loadRegistryWithLanePresets(options.registry);
+		registry = loaded.registry;
+		laneConflicts = loaded.conflicts;
 	} catch (error) {
 		return degrade(describeCheckError(error), options);
 	}
@@ -96,6 +105,11 @@ export async function runCheck(options: CheckOptions, cwd: string): Promise<numb
 
 	for (const warning of registry.warnings) {
 		process.stderr.write(`warning: ${formatRegistryIssue(warning)}\n`);
+	}
+	for (const conflict of laneConflicts) {
+		process.stderr.write(
+			`warning: policy lane ${conflict.lane} overrides preset ${conflict.presetFile}; ${conflict.resolution} (${conflict.userFile})\n`,
+		);
 	}
 
 	return verdict.decision === "block" ? 1 : 0;

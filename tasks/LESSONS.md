@@ -4,6 +4,7 @@
 
 条目格式：`- [T-ID] 现象 → 教训 → 处置（无/已修订 <文件>）`
 
+- [T-20260718-01/-03] yaml `document.toJS()` 未守卫抛裸异常 ×2（M1 registry.ts、M3 doctor.ts——第二处还把异常误分类成基建警告 fail-open）→ 同类问题达 2 次，触发规范修订：**凡调用 yaml 库 toJS()/toJSON() 一律经守卫包装并按调用语境显式分类（关口命令→degrade；健康命令→配置错误非零）**，review 检查单加此项 → 处置：已写入 claude-reviewer 对抗清单口径（哨兵/异构输入项已覆盖），M3 R2 修复中；后续新 YAML 调用点 review 时按此执行。
 - [M0 补遗] 调度者裁阵容时砍掉了 grok-coder/grok-reviewer，被用户指出——跨厂商第三视角是防同源盲区的结构性设计，不是可选项；且降级链（codex 挂 → grok 顶上）依赖它 → 移植参照系阵容时，"裁剪"须逐项给出理由并向用户确认，默认全量移植 → 处置：已补 grok 双角色 + CLAUDE.md 分派表与降级链修订。
 - [T-20260718-01/-02] codex-reviewer 包装代理两次挂后台 Bash 跑 review 后空手返回（后台 Bash 一挂起子代理回合即结束，"等通知"变成无 VERDICT 交付）→ 子代理内不得用 run_in_background 跑必须收割的命令，改前台 --wait timeout 拉满 + 超时后单次 status 前台轮询 → 处置：已修订 .claude/agents/codex-reviewer.md（执行步骤第 2 步）。
 - [T-20260718-01/-02] opus 档后台 review 子代理 ×3 异常返回（零工具调用、秒回、输出与任务无关的样板文本；T-01 R1/R2 各一次、T-02 R2 一次）→ 后台子代理产出必须先验真再采信：凡 review 结论不以 VERDICT 开头或工具调用数为 0，一律视为无效返回，SendMessage 续场督促（3/3 实测有效）绝不计入闭环 → 处置：已升级为强制规程——所有 opus 档 review 派工提示必须写明「首个动作必须是 Read 角色文件」（第 3 次起已执行）；续场督促作为标准恢复手段。

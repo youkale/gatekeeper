@@ -214,6 +214,238 @@ consumers:
 		`);
 	});
 
+	it("accepts all four lane primitives, applies check-run defaults, and retains nested x- extensions", () => {
+		const registry = parseRegistry([
+			{
+				path: "policy.yaml",
+				content: `
+apiVersion: gatekeeper/v1
+lanes:
+  human:
+    type: human-approval
+    min: 1
+    fresh: true
+    x-owner: platform
+  reviewer:
+    type: review
+    author: copilot-*[bot]
+    pass:
+      state: COMMENTED
+      body_matches:
+        pattern: summary|review
+        ignore_case: true
+        x-source: preset
+      ignore_case: false
+      x-pass-note: retained
+    x-lane-note: retained
+  checks:
+    type: check-run
+    name: greptile*
+    x-provider: github
+  status:
+    type: check-run
+    selector: status
+    name: deploy/*
+    pass: [success, neutral]
+  comments:
+    type: comment-scan
+    author: release-*[bot]
+    body_matches:
+      pattern: ready to merge
+      x-format: text
+    ignore_case: true
+    x-origin: issue
+levels:
+  strict:
+    enforcement: block
+    require: { m: 4, lanes: [human, reviewer, checks, comments] }
+`,
+			},
+		]);
+
+		expect(registry.policy.lanes.human).toMatchObject({
+			type: "human-approval",
+			min: 1,
+			fresh: true,
+			"x-owner": "platform",
+		});
+		expect(registry.policy.lanes.reviewer).toMatchObject({
+			type: "review",
+			author: "copilot-*[bot]",
+			pass: {
+				state: "COMMENTED",
+				body_matches: {
+					pattern: "summary|review",
+					ignore_case: true,
+					"x-source": "preset",
+				},
+				ignore_case: false,
+				"x-pass-note": "retained",
+			},
+			"x-lane-note": "retained",
+		});
+		expect(registry.policy.lanes.checks).toEqual({
+			type: "check-run",
+			selector: "check-run",
+			name: "greptile*",
+			pass: ["success"],
+			"x-provider": "github",
+		});
+		expect(registry.policy.lanes.status).toMatchObject({
+			type: "check-run",
+			selector: "status",
+			name: "deploy/*",
+			pass: ["success", "neutral"],
+		});
+		expect(registry.policy.lanes.comments).toMatchObject({
+			type: "comment-scan",
+			author: "release-*[bot]",
+			body_matches: { pattern: "ready to merge", "x-format": "text" },
+			ignore_case: true,
+			"x-origin": "issue",
+		});
+	});
+
+	it("reports unknown keys throughout the new lane shapes with structured paths", () => {
+		const issues = capturedIssues([
+			{
+				path: "policy.yaml",
+				content: `
+apiVersion: gatekeeper/v1
+lanes:
+  checks: { type: check-run, name: build-*, selecter: status }
+  reviewer:
+    type: review
+    author: bot
+    pass: { state: APPROVED, ignorecase: true }
+  comments:
+    type: comment-scan
+    author: bot
+    body_matches: { pattern: ready, ignorecase: true }
+levels:
+  strict: { enforcement: block, require: { m: 1, lanes: [checks] } }
+`,
+			},
+		]);
+
+		expect(issues).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					path: "$.lanes.checks.selecter",
+					expected: "a known key or x-* extension",
+					hint: 'Unknown key "selecter". Did you mean "selector"?',
+				}),
+				expect.objectContaining({
+					path: "$.lanes.reviewer.pass.ignorecase",
+					expected: "a known key or x-* extension",
+					hint: 'Unknown key "ignorecase". Did you mean "ignore_case"?',
+				}),
+				expect.objectContaining({
+					path: "$.lanes.comments.body_matches.ignorecase",
+					expected: "a known key or x-* extension",
+					hint: 'Unknown key "ignorecase". Did you mean "ignore_case"?',
+				}),
+			]),
+		);
+	});
+
+	it("reports invalid review and comment body regular expressions as structured issues", () => {
+		const issues = capturedIssues([
+			{
+				path: "policy.yaml",
+				content: `
+apiVersion: gatekeeper/v1
+lanes:
+  reviewer:
+    type: review
+    author: bot
+    pass: { state: APPROVED, body_matches: "[" }
+  comments:
+    type: comment-scan
+    author: bot
+    body_matches: { pattern: "(" }
+levels:
+  strict: { enforcement: block, require: { m: 1, lanes: [reviewer] } }
+`,
+			},
+		]);
+
+		expect(issues).toEqual(
+			expect.arrayContaining([
+				{
+					file: "policy.yaml",
+					path: "$.lanes.reviewer.pass.body_matches",
+					expected: "a valid JavaScript regular expression",
+					actual: '"["',
+					hint: "Invalid regular expression: /[/: Unterminated character class",
+				},
+				{
+					file: "policy.yaml",
+					path: "$.lanes.comments.body_matches.pattern",
+					expected: "a valid JavaScript regular expression",
+					actual: '"("',
+					hint: "Invalid regular expression: /(/: Unterminated group",
+				},
+			]),
+		);
+	});
+
+	it.each([
+		{
+			name: "rejects an empty check-run pass set",
+			lane: "checks",
+			definition: "{ type: check-run, name: build-*, pass: [] }",
+			expected: {
+				path: "$.lanes.checks.pass",
+				expected: "at least 1 item(s)",
+				actual: "array(0)",
+			},
+		},
+		{
+			name: "rejects an invalid check-run selector",
+			lane: "checks",
+			definition: "{ type: check-run, selector: workflow, name: build-* }",
+			expected: {
+				path: "$.lanes.checks.selector",
+				expected: "check-run | status",
+				actual: '"workflow"',
+			},
+		},
+		{
+			name: "rejects an invalid review state",
+			lane: "reviewer",
+			definition: "{ type: review, author: bot, pass: { state: BLOCKED } }",
+			expected: {
+				path: "$.lanes.reviewer.pass.state",
+				expected: "APPROVED | CHANGES_REQUESTED | COMMENTED | DISMISSED | PENDING",
+				actual: '"BLOCKED"',
+			},
+		},
+		{
+			name: "requires comment-scan body_matches",
+			lane: "comments",
+			definition: "{ type: comment-scan, author: bot }",
+			expected: {
+				path: "$.lanes.comments.body_matches",
+				actual: "missing",
+			},
+		},
+	])("$name", ({ lane, definition, expected }) => {
+		const issues = capturedIssues([
+			{
+				path: "policy.yaml",
+				content: `
+apiVersion: gatekeeper/v1
+lanes:
+  ${lane}: ${definition}
+levels: {}
+`,
+			},
+		]);
+
+		expect(issues).toEqual(expect.arrayContaining([expect.objectContaining(expected)]));
+	});
+
 	it("rejects prototype-chain key names at top-level and nested objects", () => {
 		const issues = capturedIssues([
 			{ path: "policy.yaml", content: validPolicy },

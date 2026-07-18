@@ -90,8 +90,17 @@ const humanApprovalLaneShape = {
 
 const humanApprovalLaneSchema = z.object(humanApprovalLaneShape).passthrough();
 
+const regexMatchSchema = extensibleStrictObject({
+	pattern: z.string(),
+	ignore_case: z.boolean().optional(),
+});
+
+const bodyMatchSchema = z.union([z.string(), regexMatchSchema]);
+
 const reviewLanePassSchema = extensibleStrictObject({
-	state: z.literal("APPROVED"),
+	state: z.enum(["APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED", "PENDING"]),
+	body_matches: bodyMatchSchema.optional(),
+	ignore_case: z.boolean().optional(),
 });
 
 const reviewLaneShape = {
@@ -102,19 +111,70 @@ const reviewLaneShape = {
 
 const reviewLaneSchema = z.object(reviewLaneShape).passthrough();
 
-export const laneSchema = z.preprocess(
-	(value, context) => {
+const checkRunLaneShape = {
+	type: z.literal("check-run"),
+	selector: z.enum(["check-run", "status"]).default("check-run"),
+	name: z.string(),
+	pass: z.array(z.string()).min(1).default(["success"]),
+};
+
+const checkRunLaneSchema = z.object(checkRunLaneShape).passthrough();
+
+const commentScanLaneShape = {
+	type: z.literal("comment-scan"),
+	author: z.string(),
+	body_matches: bodyMatchSchema,
+	ignore_case: z.boolean().optional(),
+};
+
+const commentScanLaneSchema = z.object(commentScanLaneShape).passthrough();
+
+const laneUnionSchema = z.discriminatedUnion("type", [
+	humanApprovalLaneSchema,
+	reviewLaneSchema,
+	checkRunLaneSchema,
+	commentScanLaneSchema,
+]);
+
+export const laneSchema = z
+	.preprocess((value, context) => {
 		const type =
 			typeof value === "object" && value !== null && !Array.isArray(value)
 				? (value as Record<string, unknown>).type
 				: undefined;
 		const shape =
-			type === "human-approval" ? humanApprovalLaneShape : type === "review" ? reviewLaneShape : { type: z.never() };
+			type === "human-approval"
+				? humanApprovalLaneShape
+				: type === "review"
+					? reviewLaneShape
+					: type === "check-run"
+						? checkRunLaneShape
+						: type === "comment-scan"
+							? commentScanLaneShape
+							: { type: z.never() };
 		reportUnknownKeys(value, shape, context);
 		return value;
-	},
-	z.discriminatedUnion("type", [humanApprovalLaneSchema, reviewLaneSchema]),
-);
+	}, laneUnionSchema)
+	.superRefine((lane, context) => {
+		const bodyMatch =
+			lane.type === "review" ? lane.pass.body_matches : lane.type === "comment-scan" ? lane.body_matches : undefined;
+		if (bodyMatch === undefined) {
+			return;
+		}
+
+		const pattern = typeof bodyMatch === "string" ? bodyMatch : bodyMatch.pattern;
+		try {
+			new RegExp(pattern);
+		} catch (error) {
+			const basePath = lane.type === "review" ? ["pass", "body_matches"] : ["body_matches"];
+			context.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: typeof bodyMatch === "string" ? basePath : [...basePath, "pattern"],
+				message: error instanceof Error ? error.message : "Regular expression compilation failed",
+				params: { kind: "invalid-regex" },
+			});
+		}
+	});
 
 export const levelRequirementSchema = extensibleStrictObject({
 	m: z.number().int().positive().optional(),

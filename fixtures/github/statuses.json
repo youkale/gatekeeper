@@ -1,0 +1,68 @@
+[
+  {
+    "url": "https://api.github.com/repos/acme/gatekeeper/statuses/4001",
+    "avatar_url": "https://avatars.githubusercontent.com/u/501?v=4",
+    "id": 4001,
+    "node_id": "SC_kwDOExample01",
+    "state": "success",
+    "description": "All legacy CI jobs passed",
+    "target_url": "https://ci.example.test/builds/42",
+    "context": "continuous-integration/legacy",
+    "created_at": "2026-07-18T10:16:00Z",
+    "updated_at": "2026-07-18T10:19:00Z",
+    "creator": {
+      "login": "legacy-ci[bot]",
+      "id": 501,
+      "node_id": "BOT_kgDOLegacyCi",
+      "avatar_url": "https://avatars.githubusercontent.com/u/501?v=4",
+      "url": "https://api.github.com/users/legacy-ci%5Bbot%5D",
+      "html_url": "https://github.com/apps/legacy-ci",
+      "type": "Bot",
+      "site_admin": false
+    }
+  },
+  {
+    "url": "https://api.github.com/repos/acme/gatekeeper/statuses/4002",
+    "avatar_url": "https://avatars.githubusercontent.com/u/502?v=4",
+    "id": 4002,
+    "node_id": "SC_kwDOExample02",
+    "state": "pending",
+    "description": "Preview deployment is queued",
+    "target_url": "https://deploy.example.test/previews/42",
+    "context": "deploy/preview",
+    "created_at": "2026-07-18T10:17:00Z",
+    "updated_at": "2026-07-18T10:17:00Z",
+    "creator": {
+      "login": "deploy-preview[bot]",
+      "id": 502,
+      "node_id": "BOT_kgDODeployPreview",
+      "avatar_url": "https://avatars.githubusercontent.com/u/502?v=4",
+      "url": "https://api.github.com/users/deploy-preview%5Bbot%5D",
+      "html_url": "https://github.com/apps/deploy-preview",
+      "type": "Bot",
+      "site_admin": false
+    }
+  },
+  {
+    "url": "https://api.github.com/repos/acme/gatekeeper/statuses/3999",
+    "avatar_url": "https://avatars.githubusercontent.com/u/501?v=4",
+    "id": 3999,
+    "node_id": "SC_kwDOExample00",
+    "state": "failure",
+    "description": "An earlier legacy CI attempt failed",
+    "target_url": "https://ci.example.test/builds/41",
+    "context": "continuous-integration/legacy",
+    "created_at": "2026-07-18T10:00:00Z",
+    "updated_at": "2026-07-18T10:01:00Z",
+    "creator": {
+      "login": "legacy-ci[bot]",
+      "id": 501,
+      "node_id": "BOT_kgDOLegacyCi",
+      "avatar_url": "https://avatars.githubusercontent.com/u/501?v=4",
+      "url": "https://api.github.com/users/legacy-ci%5Bbot%5D",
+      "html_url": "https://github.com/apps/legacy-ci",
+      "type": "Bot",
+      "site_admin": false
+    }
+  }
+]

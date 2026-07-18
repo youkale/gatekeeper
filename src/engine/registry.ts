@@ -90,7 +90,13 @@ function expectedFromZodIssue(issue: z.ZodIssue): string {
 			return "one supported object shape";
 		case "custom": {
 			const params = issue.params as { kind?: string } | undefined;
-			return params?.kind === "unknown-key" ? "a known key or x-* extension" : "valid value";
+			if (params?.kind === "unknown-key") {
+				return "a known key or x-* extension";
+			}
+			if (params?.kind === "invalid-regex") {
+				return "a valid JavaScript regular expression";
+			}
+			return "valid value";
 		}
 		default:
 			return "valid value";

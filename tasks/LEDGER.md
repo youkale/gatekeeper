@@ -8,12 +8,17 @@
 
 | T-20260718-02 | M2 | 本地 CLI：gitdiff provider + check/validate + e2e（规格：docs/designs/M2-cli.md） | sonnet-coder | R1: 双 FAIL（8 项）；R2: 双 PASS（2 轮） | ✅ 验收提交 | records/T-20260718-02-m2-cli.md |
 
+| T-20260718-03 | M3 | GitHub 侧：PR provider + gate lanes + sticky comment + doctor + lane schema 四原语（规格：docs/designs/M3-github.md） | codex | R1: codex FAIL(5) + claude PASS(2 升级) + grok 缺席；R2: 双 PASS（2 轮） | ✅ 验收提交 | records/T-20260718-03-m3-github.md |
+
 ### 遗留债队列（活动）
 
 - [T-01] SPEC 注明 if_content 正则不得锚定行首（M8 落实）
 - [T-01] registry alias 错误 throw 丢弃已累积 issue，按需累积化（诊断完整性，非判定缺陷）
 - [T-01] billion-laughs 场景 hint 文案复用 anchor 措辞（低优）
 - [T-02] M8 文档义务：--working-tree 不含 untracked 文件；resolveBaseRef 仅探本地 main/master（CI 需显式 --base 或先 fetch 建分支）
+- [T-03] M8 文档义务：lane author 含 `[bot]` 字面量时 picomatch 字符类陷阱（通配符+[bot] 混写会意外不匹配）；check-run neutral/skipped/stale 归 pending 可能永久阻塞的运维提示
+- [T-03] grok-reviewer R1/R2 均缺席：grok CLI 未登录（Not signed in）——用户登录后从下一轮起补上第三路
+- [T-03] M8 文档义务追加：GATEKEEPER_COMMENT_AUTHOR 生产部署应显式设置（归因信任边界）；doctor --workflow 显式路径不存在时 fail-open 的行为说明
 
 ## 遗留债队列
 

@@ -1,0 +1,7 @@
+type: review
+author: copilot-pull-request-reviewer[bot]
+pass:
+  state: COMMENTED
+  body_matches:
+    pattern: summary|review
+    ignore_case: true

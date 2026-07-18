@@ -10,6 +10,7 @@
   "main": "dist/index.js",
   "files": [
     "dist",
+    "lanes.d",
     "schema",
     "action.yml"
   ],

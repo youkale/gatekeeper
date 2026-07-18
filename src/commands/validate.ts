@@ -1,6 +1,7 @@
-import { formatRegistryIssue, parseRegistry, RegistryParseError } from "../engine/registry.js";
+import { formatRegistryIssue, RegistryParseError } from "../engine/registry.js";
 import type { Registry, RegistryIssue } from "../engine/types.js";
-import { RegistryReadError, readRegistryFiles } from "../providers/fsregistry.js";
+import { LanePresetParseError, LanePresetReadError, loadRegistryWithLanePresets } from "../gate/presets.js";
+import { RegistryReadError } from "../providers/fsregistry.js";
 
 export interface ValidateOptions {
 	registry: string;
@@ -55,19 +56,9 @@ function lintRegistry(registry: Registry): RegistryIssue[] {
 }
 
 export async function runValidate(options: ValidateOptions): Promise<number> {
-	let files: Awaited<ReturnType<typeof readRegistryFiles>>;
+	let loaded: Awaited<ReturnType<typeof loadRegistryWithLanePresets>>;
 	try {
-		files = await readRegistryFiles(options.registry);
-	} catch (error) {
-		const reason =
-			error instanceof RegistryReadError ? error.reason : error instanceof Error ? error.message : String(error);
-		process.stderr.write(`gatekeeper validate: ${reason}\n`);
-		return 2;
-	}
-
-	let registry: Registry;
-	try {
-		registry = parseRegistry(files);
+		loaded = await loadRegistryWithLanePresets(options.registry);
 	} catch (error) {
 		if (error instanceof RegistryParseError) {
 			for (const issue of error.issues) {
@@ -75,19 +66,36 @@ export async function runValidate(options: ValidateOptions): Promise<number> {
 			}
 			return 2;
 		}
+		if (error instanceof LanePresetParseError) {
+			for (const issue of error.issues) {
+				process.stderr.write(`${issue.file} ${issue.path}: ${issue.message}\n`);
+			}
+			return 2;
+		}
+		if (error instanceof RegistryReadError || error instanceof LanePresetReadError) {
+			process.stderr.write(`gatekeeper validate: ${error.reason}\n`);
+			return 2;
+		}
 		throw error;
 	}
+	const registry: Registry = loaded.registry;
 
 	const warnings = [...registry.warnings, ...lintRegistry(registry)];
 	for (const warning of warnings) {
 		process.stderr.write(`warning: ${formatRegistryIssue(warning)}\n`);
 	}
+	for (const conflict of loaded.conflicts) {
+		process.stderr.write(
+			`warning: policy lane ${conflict.lane} overrides preset ${conflict.presetFile}; ${conflict.resolution} (${conflict.userFile})\n`,
+		);
+	}
+	const warningCount = warnings.length + loaded.conflicts.length;
 
 	process.stdout.write(
-		`gatekeeper validate: OK (${registry.contracts.length} contract(s), ${warnings.length} warning(s))\n`,
+		`gatekeeper validate: OK (${registry.contracts.length} contract(s), ${warningCount} warning(s))\n`,
 	);
 
-	if (warnings.length > 0 && options.strict) {
+	if (warningCount > 0 && options.strict) {
 		return 1;
 	}
 	return 0;

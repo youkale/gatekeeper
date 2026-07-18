@@ -1,0 +1,107 @@
+[
+  {
+    "id": 2001,
+    "node_id": "PRR_kwDOExample01",
+    "user": {
+      "login": "alice",
+      "id": 101,
+      "node_id": "U_kgDOAlice",
+      "avatar_url": "https://avatars.githubusercontent.com/u/101?v=4",
+      "url": "https://api.github.com/users/alice",
+      "html_url": "https://github.com/alice",
+      "type": "User",
+      "site_admin": false
+    },
+    "body": "Please address the compatibility issue.",
+    "state": "CHANGES_REQUESTED",
+    "html_url": "https://github.com/acme/gatekeeper/pull/42#pullrequestreview-2001",
+    "pull_request_url": "https://api.github.com/repos/acme/gatekeeper/pulls/42",
+    "author_association": "MEMBER",
+    "submitted_at": "2026-07-18T10:00:00Z",
+    "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  {
+    "id": 2002,
+    "node_id": "PRR_kwDOExample02",
+    "user": {
+      "login": "bob",
+      "id": 102,
+      "node_id": "U_kgDOBob",
+      "avatar_url": "https://avatars.githubusercontent.com/u/102?v=4",
+      "url": "https://api.github.com/users/bob",
+      "html_url": "https://github.com/bob",
+      "type": "User",
+      "site_admin": false
+    },
+    "body": "Approved before the latest push.",
+    "state": "APPROVED",
+    "html_url": "https://github.com/acme/gatekeeper/pull/42#pullrequestreview-2002",
+    "pull_request_url": "https://api.github.com/repos/acme/gatekeeper/pulls/42",
+    "author_association": "MEMBER",
+    "submitted_at": "2026-07-18T10:03:00Z",
+    "commit_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  {
+    "id": 2003,
+    "node_id": "PRR_kwDOExample03",
+    "user": {
+      "login": "coderabbitai[bot]",
+      "id": 103,
+      "node_id": "BOT_kgDOCodeRabbit",
+      "avatar_url": "https://avatars.githubusercontent.com/in/123456?v=4",
+      "url": "https://api.github.com/users/coderabbitai%5Bbot%5D",
+      "html_url": "https://github.com/apps/coderabbitai",
+      "type": "Bot",
+      "site_admin": false
+    },
+    "body": "Review completed. No actionable findings.",
+    "state": "APPROVED",
+    "html_url": "https://github.com/acme/gatekeeper/pull/42#pullrequestreview-2003",
+    "pull_request_url": "https://api.github.com/repos/acme/gatekeeper/pulls/42",
+    "author_association": "NONE",
+    "submitted_at": "2026-07-18T10:05:00Z",
+    "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  {
+    "id": 2004,
+    "node_id": "PRR_kwDOExample04",
+    "user": {
+      "login": "copilot-pull-request-reviewer[bot]",
+      "id": 104,
+      "node_id": "BOT_kgDOCopilot",
+      "avatar_url": "https://avatars.githubusercontent.com/in/946832?v=4",
+      "url": "https://api.github.com/users/copilot-pull-request-reviewer%5Bbot%5D",
+      "html_url": "https://github.com/apps/copilot-pull-request-reviewer",
+      "type": "Bot",
+      "site_admin": false
+    },
+    "body": "## Pull request review summary\n\nThe change keeps the provider boundary intact.",
+    "state": "COMMENTED",
+    "html_url": "https://github.com/acme/gatekeeper/pull/42#pullrequestreview-2004",
+    "pull_request_url": "https://api.github.com/repos/acme/gatekeeper/pulls/42",
+    "author_association": "NONE",
+    "submitted_at": "2026-07-18T10:10:00Z",
+    "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  {
+    "id": 2005,
+    "node_id": "PRR_kwDOExample05",
+    "user": {
+      "login": "alice",
+      "id": 101,
+      "node_id": "U_kgDOAlice",
+      "avatar_url": "https://avatars.githubusercontent.com/u/101?v=4",
+      "url": "https://api.github.com/users/alice",
+      "html_url": "https://github.com/alice",
+      "type": "User",
+      "site_admin": false
+    },
+    "body": "The compatibility issue is resolved.",
+    "state": "APPROVED",
+    "html_url": "https://github.com/acme/gatekeeper/pull/42#pullrequestreview-2005",
+    "pull_request_url": "https://api.github.com/repos/acme/gatekeeper/pulls/42",
+    "author_association": "MEMBER",
+    "submitted_at": "2026-07-18T10:15:00Z",
+    "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+]

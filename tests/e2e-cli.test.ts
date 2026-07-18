@@ -10,7 +10,7 @@ import { parseNameStatusZ } from "../src/providers/gitdiff.js";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const cliPath = path.join(repoRoot, "src/cli.ts");
-const tsxCli = path.join(repoRoot, "node_modules/tsx/dist/cli.mjs");
+const tsxLoader = path.join(repoRoot, "node_modules/tsx/dist/loader.mjs");
 
 interface RunResult {
 	status: number;
@@ -19,7 +19,7 @@ interface RunResult {
 }
 
 function runCli(cwd: string, args: string[]): RunResult {
-	const result = spawnSync(process.execPath, [tsxCli, cliPath, ...args], { cwd, encoding: "utf8" });
+	const result = spawnSync(process.execPath, ["--import", tsxLoader, cliPath, ...args], { cwd, encoding: "utf8" });
 	return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
 }
 
@@ -213,9 +213,13 @@ describe("M2 CLI e2e", () => {
 	it("exits 0 when the stdout pipe closes early (EPIPE guard, fail-open)", async () => {
 		// Passing scenario on main: without the guard, the EPIPE crash would
 		// flip the exit code from 0 to 1.
-		const child = spawn(process.execPath, [tsxCli, cliPath, "check", "--registry", registryDir, "--json"], {
-			cwd: repoDir,
-		});
+		const child = spawn(
+			process.execPath,
+			["--import", tsxLoader, cliPath, "check", "--registry", registryDir, "--json"],
+			{
+				cwd: repoDir,
+			},
+		);
 		child.stdout.destroy();
 		child.stderr.resume();
 		const status = await new Promise<number>((resolve) => {
@@ -275,6 +279,92 @@ describe("M2 CLI e2e", () => {
 
 		expect(result.status).toBe(0);
 		expect(result.stdout).toContain("OK");
+		expect(result.stderr).toContain("warning: policy lane human overrides preset");
+	});
+
+	it("validate accepts a policy whose requirement references only a bundled lane preset", () => {
+		const presetRegistryDir = path.join(tmpBase, "preset-only-validate-registry");
+		mkdirSync(path.join(presetRegistryDir, "contracts"), { recursive: true });
+		writeFileSync(
+			path.join(presetRegistryDir, "policy.yaml"),
+			`apiVersion: gatekeeper/v1
+lanes: {}
+levels:
+  strict:
+    enforcement: block
+    require: { m: 1, lanes: [greptile] }
+`,
+		);
+		writeFileSync(
+			path.join(presetRegistryDir, "contracts", "preset-only.yaml"),
+			`apiVersion: gatekeeper/v1
+name: preset-only
+level: strict
+authority: { repo: org/app, paths: [docs/**] }
+`,
+		);
+
+		const result = runCli(repoDir, ["validate", "--registry", presetRegistryDir]);
+
+		expect(result.status).toBe(0);
+		expect(result.stdout).toContain("OK");
+		expect(result.stderr).not.toContain("Unknown lane");
+	});
+
+	it("check evaluates a registry whose requirement references only a bundled lane preset", () => {
+		const presetRegistryDir = path.join(tmpBase, "preset-only-check-registry");
+		mkdirSync(path.join(presetRegistryDir, "contracts"), { recursive: true });
+		writeFileSync(
+			path.join(presetRegistryDir, "policy.yaml"),
+			`apiVersion: gatekeeper/v1
+lanes: {}
+levels:
+  strict:
+    enforcement: block
+    require: { m: 1, lanes: [greptile] }
+`,
+		);
+		writeFileSync(
+			path.join(presetRegistryDir, "contracts", "preset-only.yaml"),
+			`apiVersion: gatekeeper/v1
+name: preset-only
+level: strict
+authority: { repo: org/app, paths: [docs/**] }
+`,
+		);
+
+		const result = runCli(repoDir, ["check", "--registry", presetRegistryDir, "--json"]);
+
+		expect(result.status).toBe(0);
+		expect(JSON.parse(result.stdout)).toMatchObject({ decision: "pass", repo: "org/app" });
+		expect(result.stderr).not.toContain("GATEKEEPER DEGRADED");
+	});
+
+	it("preserves structured registry errors for invalid user lanes at validate/check entry points", () => {
+		const invalidLaneRegistryDir = path.join(tmpBase, "invalid-user-lane-registry");
+		mkdirSync(path.join(invalidLaneRegistryDir, "contracts"), { recursive: true });
+		writeFileSync(
+			path.join(invalidLaneRegistryDir, "policy.yaml"),
+			`apiVersion: gatekeeper/v1
+lanes:
+  broken:
+    type: check-run
+    name: build-*
+    pas: [success]
+levels: {}
+`,
+		);
+
+		const validation = runCli(repoDir, ["validate", "--registry", invalidLaneRegistryDir]);
+		expect(validation.status).toBe(2);
+		expect(validation.stderr).toContain("$.lanes.broken.pas: expected a known key or x-* extension");
+		expect(validation.stderr).toContain('got array(1). Unknown key "pas". Did you mean "pass"?');
+
+		const check = runCli(repoDir, ["check", "--registry", invalidLaneRegistryDir, "--json"]);
+		expect(check.status).toBe(0);
+		expect(JSON.parse(check.stdout)).toMatchObject({ degraded: true });
+		expect(check.stderr).toContain("GATEKEEPER DEGRADED");
+		expect(check.stderr).toContain("$.lanes.broken.pas: expected a known key or x-* extension");
 	});
 
 	it("validate exits 2 for an illegal registry (unknown policy level)", () => {
@@ -292,6 +382,24 @@ describe("M2 CLI e2e", () => {
 		expect(result.status).toBe(2);
 		expect(result.stderr.length).toBeGreaterThan(0);
 		expect(contract.level).not.toBe("no-such-level");
+	});
+
+	it("validate exits 2 for a missing or non-directory registry root, including under --strict", () => {
+		const missingRegistry = path.join(tmpBase, "missing-validate-registry");
+
+		const plain = runCli(repoDir, ["validate", "--registry", missingRegistry]);
+		expect(plain.status).toBe(2);
+		expect(plain.stderr).toContain("gatekeeper validate: failed to access registry directory");
+
+		const strict = runCli(repoDir, ["validate", "--registry", missingRegistry, "--strict"]);
+		expect(strict.status).toBe(2);
+		expect(strict.stderr).toContain("gatekeeper validate: failed to access registry directory");
+
+		const registryFile = path.join(tmpBase, "validate-registry-file");
+		writeFileSync(registryFile, "not a registry directory\n");
+		const nonDirectory = runCli(repoDir, ["validate", "--registry", registryFile]);
+		expect(nonDirectory.status).toBe(2);
+		expect(nonDirectory.stderr).toContain("gatekeeper validate: registry path is not a directory");
 	});
 
 	it("validate warns (exit 0) on a bare '**' glob, and --strict elevates it to exit 1", () => {

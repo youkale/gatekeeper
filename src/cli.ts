@@ -2,9 +2,11 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { Command, CommanderError, Option } from "commander";
+import { Command, CommanderError, InvalidArgumentError, Option } from "commander";
 
 import { runCheck } from "./commands/check.js";
+import { runDoctor } from "./commands/doctor.js";
+import { runGate } from "./commands/gate.js";
 import { runValidate } from "./commands/validate.js";
 
 // EPIPE guard: when a consumer closes the read end of our pipe early
@@ -28,6 +30,18 @@ const { version } = JSON.parse(readFileSync(packageJsonPath, "utf8")) as { versi
 
 const program = new Command();
 program.name("gatekeeper").description("Contract-aware merge gate for multi-repo organizations.").version(version);
+
+function positiveInteger(value: string): number {
+	const parsed = Number(value);
+	if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+		throw new InvalidArgumentError("must be a positive integer");
+	}
+	return parsed;
+}
+
+function collect(value: string, previous: string[]): string[] {
+	return [...previous, value];
+}
 
 // exitOverride must be set before subcommands are added: Command#command()
 // copies the parent's exit callback onto the new subcommand at creation time.
@@ -73,6 +87,30 @@ program
 	.option("--strict", "treat warnings as failures (exit 1)", false)
 	.action(async (options) => {
 		process.exitCode = await runValidate(options);
+	});
+
+program
+	.command("gate")
+	.description("Evaluate a GitHub pull request and upsert its sticky gate verdict comment.")
+	.requiredOption("--pr <n>", "pull request number", positiveInteger)
+	.requiredOption("--registry <dir>", "path to the registry directory")
+	.option("--repo <org/name>", "explicit GitHub repository (defaults to GITHUB_REPOSITORY or origin)")
+	.option("--json", "emit the gate report as JSON on stdout", false)
+	.option("--explain", "include file -> glob -> contract -> policy provenance in the sticky comment", false)
+	.action(async (options) => {
+		process.exitCode = await runGate(options, process.cwd());
+	});
+
+program
+	.command("doctor")
+	.description("Validate registry lanes and GitHub branch-protection required checks.")
+	.requiredOption("--registry <dir>", "path to the registry directory")
+	.option("--repo <org/name>", "explicit GitHub repository (defaults to GITHUB_REPOSITORY or origin)")
+	.option("--branch <name>", "protected branch (defaults to GITHUB_BASE_REF or main)")
+	.option("--workflow <path>", "workflow file or directory (defaults to .github/workflows)")
+	.option("--check-name <name>", "expected required check name (repeatable; bypasses workflow discovery)", collect, [])
+	.action(async (options) => {
+		process.exitCode = await runDoctor(options, process.cwd());
 	});
 
 try {
