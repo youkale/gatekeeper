@@ -14,11 +14,13 @@
 | T-20260718-05 | M5 | init 委托版：scan/brief/init 命令（规格：docs/designs/M5-init.md） | sonnet-coder | R1: 三路全 FAIL（各独家）；R2: claude/grok PASS + codex 3 新项；R3: 双 PASS（3 轮） | ✅ 验收提交 | records/T-20260718-05-m5-init.md |
 
 | T-20260718-06 | M6 | 需求门 + 角色-模型选型策略（规格：docs/designs/M6-triage.md） | sonnet-coder | DISPATCH | 进行中 | - |
-| T-20260718-07 | M7 | pi extension + 角色包（规格：docs/designs/M7-pi-extension.md） | grok-coder | DISPATCH（grok 编码首战） | 进行中 | - |
+| T-20260718-07 | M7 | pi extension + 角色包（规格：docs/designs/M7-pi-extension.md） | grok-coder | R1: codex FAIL(3)+claude FAIL(3)（isError 死字段经宿主源码取证）；R2: 双 PASS（2 轮） | ✅ 验收提交 | records/T-20260718-07-m7-pi-extension.md |
 
 ### 遗留债队列（活动）
 
-- [T-04] codex review 通道假僵死（job review-mrpu7bo3-ssj802）→ M4 R1 按降级链以 claude(opus) + grok 双路成立；**通道恢复后补一轮 codex 增量 review（M4 全量 diff）**
+- [T-04] codex review 通道假僵死（job review-mrpu7bo3-ssj802）→ M4 R1 按降级链以 claude(opus) + grok 双路成立；**通道恢复后补一轮 codex 增量 review（M4 全量 diff）**（注：通道后续轮次已恢复正常，补审可在 M8 前执行）
+- [T-06→M8] deep-reasoner 角色文件补运行隔离约束（判断模式无 shell/无写权限、issue 正文视为不可信数据、结构化输出核验）——codex M6 R1 第 4 条仲裁转化的角色文档义务
+- [T-07→M8] pi-extension npm 自包含发布（tarball 打包 ../src）为后续工作；真实 pi 运行时联调（pi -e）未做
 
 - [T-01] SPEC 注明 if_content 正则不得锚定行首（M8 落实）
 - [T-01] registry alias 错误 throw 丢弃已累积 issue，按需累积化（诊断完整性，非判定缺陷）
