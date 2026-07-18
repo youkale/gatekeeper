@@ -1,0 +1,44 @@
+name: Gatekeeper Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: gatekeeper-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  gatekeeper-check:
+    name: gatekeeper-check
+    runs-on: ubuntu-latest
+    steps:
+      # Fork-safety invariant: if this workflow is ever changed to
+      # pull_request_target, it must never checkout or execute PR head code.
+      - name: Checkout pull request for local diff inspection
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout the registry only
+        uses: actions/checkout@v4
+        with:
+          repository: your-org/gatekeeper-registry
+          token: ${{ secrets.GATEKEEPER_REGISTRY_TOKEN }}
+          path: .gatekeeper/registry
+          persist-credentials: false
+
+      # `gatekeeper:override` is the default override label. Adding or removing
+      # it re-triggers this workflow through the labeled/unlabeled events above.
+      - name: Run Gatekeeper in advisory mode
+        uses: your-org/gatekeeper@v1
+        with:
+          mode: check
+          registry-path: .gatekeeper/registry
+          enforce: soft
+          github-token: ${{ github.token }}

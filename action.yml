@@ -1,0 +1,23 @@
+name: Gatekeeper
+description: Evaluate contract-aware pull request checks and gates.
+inputs:
+  mode:
+    description: Run the local diff check or the GitHub pull request gate.
+    required: false
+    default: gate
+  registry-path:
+    description: Path to the checked-out Gatekeeper registry directory.
+    required: true
+  enforce:
+    description: Use hard to fail confirmed block verdicts or soft to report them without failing.
+    required: false
+    default: hard
+  github-token:
+    description: GitHub token used to read pull request evidence and upsert the sticky comment.
+    required: true
+runs:
+  using: node20
+  main: dist/action.js
+branding:
+  icon: shield
+  color: purple

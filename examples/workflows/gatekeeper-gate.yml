@@ -1,0 +1,48 @@
+name: Gatekeeper Gate
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  pull_request_review:
+    types: [submitted, dismissed]
+  check_suite:
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: read
+  statuses: read
+
+concurrency:
+  group: >-
+    gatekeeper-gate-${{ github.event.pull_request.number ||
+    github.event.check_suite.pull_requests[0].number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  gatekeeper-gate:
+    # This job/check name must exactly match the branch-protection required
+    # check. Run `gatekeeper doctor` to validate that external contract.
+    name: gatekeeper-gate
+    runs-on: ubuntu-latest
+    steps:
+      # Fork-safety invariant: this pull_request_target workflow must never
+      # checkout or execute PR head code. The only checkout is the registry.
+      - name: Checkout the registry only
+        uses: actions/checkout@v4
+        with:
+          repository: your-org/gatekeeper-registry
+          token: ${{ secrets.GATEKEEPER_REGISTRY_TOKEN }}
+          path: .gatekeeper/registry
+          persist-credentials: false
+
+      # `gatekeeper:override` is the default override label. The labeled and
+      # unlabeled triggers above immediately recompute the gate when it changes.
+      - name: Enforce Gatekeeper
+        uses: your-org/gatekeeper@v1
+        with:
+          mode: gate
+          registry-path: .gatekeeper/registry
+          enforce: hard
+          github-token: ${{ github.token }}

@@ -4,9 +4,11 @@ import { fileURLToPath } from "node:url";
 
 import { Command, CommanderError, InvalidArgumentError, Option } from "commander";
 
+import { runAudit } from "./commands/audit.js";
 import { runCheck } from "./commands/check.js";
 import { runDoctor } from "./commands/doctor.js";
 import { runGate } from "./commands/gate.js";
+import { runStats } from "./commands/stats.js";
 import { runValidate } from "./commands/validate.js";
 
 // EPIPE guard: when a consumer closes the read end of our pipe early
@@ -111,6 +113,34 @@ program
 	.option("--check-name <name>", "expected required check name (repeatable; bypasses workflow discovery)", collect, [])
 	.action(async (options) => {
 		process.exitCode = await runDoctor(options, process.cwd());
+	});
+
+program
+	.command("audit")
+	.description("Check registry glob drift against local repository checkouts.")
+	.requiredOption("--registry <dir>", "path to the registry directory")
+	.requiredOption(
+		"--repo-path <org/name=path>",
+		"map a registry repository to a local checkout (repeatable)",
+		collect,
+		[],
+	)
+	.option("--json", "emit the audit report as JSON", false)
+	.action(async (options) => {
+		process.exitCode = await runAudit(options, process.cwd());
+	});
+
+program
+	.command("stats")
+	.description("Aggregate Gatekeeper ledger rounds from GitHub or a local JSONL file.")
+	.addOption(new Option("--source <source>", "ledger source").choices(["github", "local"]).default("local"))
+	.option("--repo <org/name>", "GitHub repository (required with --source github)")
+	.option("--token <token>", "GitHub token (defaults to GITHUB_TOKEN)")
+	.option("--file <path>", "local JSONL ledger (defaults to .gatekeeper/ledger.jsonl)")
+	.option("--since <date>", "harvest merged GitHub PRs at or after this ISO date/time")
+	.option("--json", "emit the aggregate report as JSON", false)
+	.action(async (options) => {
+		process.exitCode = await runStats(options, process.cwd());
 	});
 
 try {
