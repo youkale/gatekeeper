@@ -18,7 +18,7 @@
 
 ### 遗留债队列（活动）
 
-- [T-04] codex review 通道假僵死（job review-mrpu7bo3-ssj802）→ M4 R1 按降级链以 claude(opus) + grok 双路成立；**通道恢复后补一轮 codex 增量 review（M4 全量 diff）**（注：通道后续轮次已恢复正常，补审可在 M8 前执行）
+- [T-04] ~~codex 补审~~ **已执行**（job review-mrpz3xpi-leh3t6，detached checkout 精确复现 41fece2 范围）：发现 2 条穿过降级双审的 blocker（stats 整页校验中止收割、非 EPIPE 流错误逃逸 fail-open 边界），修复中——跨厂商补漏价值实证
 - [T-06→M8] deep-reasoner 角色文件补运行隔离约束（判断模式无 shell/无写权限、issue 正文视为不可信数据、结构化输出核验）——codex M6 R1 第 4 条仲裁转化的角色文档义务
 - [T-07→M8] pi-extension npm 自包含发布（tarball 打包 ../src）为后续工作；真实 pi 运行时联调（pi -e）未做
 

@@ -26,6 +26,8 @@ export interface StatsUnparsable {
 	pr: number | null;
 	commentId: number | null;
 	line: number | null;
+	page: number | null;
+	itemIndex: number | null;
 	reason: string;
 }
 
@@ -147,6 +149,8 @@ export function parseLedgerComments(comments: readonly StatsComment[], pullReque
 				pr: pullRequest ?? null,
 				commentId: comment.id,
 				line: null,
+				page: null,
+				itemIndex: null,
 				reason: "marker comment has no fenced json gatekeeper-ledger block",
 			});
 			continue;
@@ -162,6 +166,8 @@ export function parseLedgerComments(comments: readonly StatsComment[], pullReque
 				pr: pullRequest ?? null,
 				commentId: comment.id,
 				line: null,
+				page: null,
+				itemIndex: null,
 				reason: error instanceof StatsError ? error.reason : error instanceof Error ? error.message : String(error),
 			});
 		}
@@ -184,6 +190,8 @@ export function parseLedgerJsonl(content: string): ParsedLedgers {
 				pr: null,
 				commentId: null,
 				line: index + 1,
+				page: null,
+				itemIndex: null,
 				reason: error instanceof StatsError ? error.reason : error instanceof Error ? error.message : String(error),
 			});
 		}
@@ -316,21 +324,39 @@ function pullSummaries(value: unknown): GitHubPullSummary[] {
 	});
 }
 
-function statsComments(value: unknown): StatsComment[] {
+interface ParsedStatsComments {
+	comments: StatsComment[];
+	unparsable: StatsUnparsable[];
+	itemCount: number;
+}
+
+function statsComments(value: unknown, pullRequest: number, page: number): ParsedStatsComments {
 	if (!Array.isArray(value)) {
 		throw new StatsError("GitHub comments response must be an array");
 	}
-	return value.map((item, index) => {
+	const comments: StatsComment[] = [];
+	const unparsable: StatsUnparsable[] = [];
+	for (const [index, item] of value.entries()) {
 		if (
 			!isRecord(item) ||
 			!Number.isSafeInteger(item.id) ||
 			(item.id as number) <= 0 ||
 			!(item.body === null || typeof item.body === "string")
 		) {
-			throw new StatsError(`GitHub comments response item ${index} is malformed`);
+			unparsable.push({
+				pr: pullRequest,
+				commentId:
+					isRecord(item) && Number.isSafeInteger(item.id) && (item.id as number) > 0 ? (item.id as number) : null,
+				line: null,
+				page,
+				itemIndex: index,
+				reason: `GitHub comments response item ${index} is malformed`,
+			});
+			continue;
 		}
-		return { id: item.id as number, body: item.body as string | null };
-	});
+		comments.push({ id: item.id as number, body: item.body as string | null });
+	}
+	return { comments, unparsable, itemCount: value.length };
 }
 
 async function fetchMergedPullRequests(
@@ -367,14 +393,17 @@ async function fetchPullComments(
 	base: string,
 	pullRequest: number,
 	token: string | undefined,
-): Promise<StatsComment[]> {
+): Promise<ParsedLedgers> {
 	const comments: StatsComment[] = [];
+	const unparsable: StatsUnparsable[] = [];
 	for (let page = 1; page <= MAX_PAGES; page += 1) {
 		const url = `${base}/issues/${pullRequest}/comments?per_page=${PAGE_SIZE}&page=${page}`;
-		const values = statsComments(await requestJson(fetcher, url, token));
-		comments.push(...values);
-		if (values.length < PAGE_SIZE) {
-			return comments;
+		const parsedPage = statsComments(await requestJson(fetcher, url, token), pullRequest, page);
+		comments.push(...parsedPage.comments);
+		unparsable.push(...parsedPage.unparsable);
+		if (parsedPage.itemCount < PAGE_SIZE) {
+			const harvested = parseLedgerComments(comments, pullRequest);
+			return { ledgers: harvested.ledgers, unparsable: [...unparsable, ...harvested.unparsable] };
 		}
 	}
 	throw new StatsError(`GitHub comment pagination for PR #${pullRequest} exceeded ${MAX_PAGES} pages`);
@@ -404,8 +433,7 @@ async function githubLedgers(
 	const pulls = await fetchMergedPullRequests(fetcher, base, token, sinceTimestamp(options.since));
 	const parsed: ParsedLedgers = { ledgers: [], unparsable: [] };
 	for (const pull of pulls) {
-		const comments = await fetchPullComments(fetcher, base, pull.number, token);
-		const harvested = parseLedgerComments(comments, pull.number);
+		const harvested = await fetchPullComments(fetcher, base, pull.number, token);
 		parsed.ledgers.push(...harvested.ledgers);
 		parsed.unparsable.push(...harvested.unparsable);
 	}

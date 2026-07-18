@@ -18,9 +18,47 @@ interface RunResult {
 	stderr: string;
 }
 
+interface StreamErrorRunResult extends RunResult {
+	signal: NodeJS.Signals | null;
+	warningLog: string;
+}
+
 function runCli(cwd: string, args: string[]): RunResult {
 	const result = spawnSync(process.execPath, ["--import", tsxLoader, cliPath, ...args], { cwd, encoding: "utf8" });
 	return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
+}
+
+async function runCliWithStreamError(
+	cwd: string,
+	args: string[],
+	preloadPath: string,
+	warningPath: string,
+	streamName: "stdout" | "stderr",
+): Promise<StreamErrorRunResult> {
+	writeFileSync(warningPath, "");
+	const child = spawn(process.execPath, ["--import", preloadPath, "--import", tsxLoader, cliPath, ...args], {
+		cwd,
+		env: {
+			...process.env,
+			GATEKEEPER_TEST_STREAM: streamName,
+			GATEKEEPER_TEST_WARNING_LOG: warningPath,
+		},
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+	let stdout = "";
+	let stderr = "";
+	child.stdout.setEncoding("utf8");
+	child.stderr.setEncoding("utf8");
+	child.stdout.on("data", (chunk: string) => {
+		stdout += chunk;
+	});
+	child.stderr.on("data", (chunk: string) => {
+		stderr += chunk;
+	});
+	const { status, signal } = await new Promise<{ status: number; signal: NodeJS.Signals | null }>((resolve) => {
+		child.on("close", (code, closeSignal) => resolve({ status: code ?? -1, signal: closeSignal }));
+	});
+	return { status, signal, stdout, stderr, warningLog: readFileSync(warningPath, "utf8") };
 }
 
 function git(cwd: string, args: string[]): string {
@@ -50,9 +88,29 @@ describe("M2 CLI e2e", () => {
 	let tmpBase: string;
 	let registryDir: string;
 	let repoDir: string;
+	let streamErrorPreloadPath: string;
 
 	beforeAll(() => {
 		tmpBase = mkdtempSync(path.join(tmpdir(), "gatekeeper-e2e-"));
+		streamErrorPreloadPath = path.join(tmpBase, "stream-error.mjs");
+		writeFileSync(
+			streamErrorPreloadPath,
+			`import { appendFileSync } from "node:fs";
+
+const streamName = process.env.GATEKEEPER_TEST_STREAM;
+const otherStream = streamName === "stdout" ? process.stderr : process.stdout;
+const originalWrite = otherStream.write.bind(otherStream);
+otherStream.write = (chunk, ...args) => {
+	appendFileSync(process.env.GATEKEEPER_TEST_WARNING_LOG, String(chunk));
+	return originalWrite(chunk, ...args);
+};
+
+process.once("beforeExit", () => {
+	const error = Object.assign(new Error("simulated stream failure"), { code: "EIO" });
+	process[streamName].emit("error", error);
+});
+`,
+		);
 
 		registryDir = path.join(tmpBase, "registry");
 		mkdirSync(path.join(registryDir, "contracts"), { recursive: true });
@@ -227,6 +285,42 @@ describe("M2 CLI e2e", () => {
 		});
 
 		expect(status).toBe(0);
+	});
+
+	it("does not crash when the CLI stdout stream emits non-EPIPE EIO", async () => {
+		const warningPath = path.join(tmpBase, "stdout-eio-warning.log");
+		const result = await runCliWithStreamError(
+			repoDir,
+			["check", "--registry", registryDir, "--json"],
+			streamErrorPreloadPath,
+			warningPath,
+			"stdout",
+		);
+
+		expect(result.signal).toBeNull();
+		expect(result.status).toBe(0);
+		expect(result.warningLog).toContain("warning: Gatekeeper stdout stream error (EIO); preserving exit code");
+	});
+
+	it("preserves a CLI block exit code when stderr emits non-EPIPE EIO", async () => {
+		const warningPath = path.join(tmpBase, "stderr-eio-warning.log");
+		writeFileSync(path.join(repoDir, ".github/workflows/release.yml"), WORKFLOW_V2);
+		try {
+			const result = await runCliWithStreamError(
+				repoDir,
+				["check", "--registry", registryDir, "--working-tree", "--json"],
+				streamErrorPreloadPath,
+				warningPath,
+				"stderr",
+			);
+
+			expect(result.signal).toBeNull();
+			expect(result.status).toBe(1);
+			expect(result.warningLog).toContain("warning: Gatekeeper stderr stream error (EIO); preserving exit code");
+			expect(result.stderr).not.toContain("simulated stream failure");
+		} finally {
+			git(repoDir, ["checkout", "-q", "--", ".github/workflows/release.yml"]);
+		}
 	});
 
 	it("fails open (exit 0 + DEGRADED) when the registry directory does not exist, and --json reports degraded", () => {

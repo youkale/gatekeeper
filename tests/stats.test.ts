@@ -76,6 +76,8 @@ describe("stats ledger harvesting", () => {
 				pr: 7,
 				commentId: 10,
 				line: null,
+				page: null,
+				itemIndex: null,
 				reason: "marker comment has no fenced json gatekeeper-ledger block",
 			},
 		]);
@@ -97,7 +99,7 @@ describe("stats aggregation", () => {
 			ledger(1, { contracts: ["public-api"], issues: [9], override: true }),
 			ledger(2, { decision: "warn", contracts: ["artifact-manifest"], issues: [9, 10] }),
 		];
-		const unparsable = [{ pr: 3, commentId: 88, line: null, reason: "broken" }];
+		const unparsable = [{ pr: 3, commentId: 88, line: null, page: null, itemIndex: null, reason: "broken" }];
 
 		const report = aggregateStats(rounds, 4, unparsable);
 
@@ -157,5 +159,50 @@ describe("stats aggregation", () => {
 		>;
 		expect(report).toMatchObject({ totalPrs: 2, matchedPrs: 1, hitRate: 0.5, rounds: 1 });
 		expect(report.unparsable).toHaveLength(1);
+	});
+
+	it("keeps valid REST comments when another envelope on the page is malformed", async () => {
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			const url = String(input);
+			if (url.includes("/pulls?")) {
+				return new Response(
+					JSON.stringify([{ number: 7, merged_at: "2026-07-18T00:00:00Z", updated_at: "2026-07-18T00:01:00Z" }]),
+				);
+			}
+			if (url.includes("/issues/7/comments")) {
+				return new Response(
+					JSON.stringify([
+						ledgerComment(701, ledger(7)),
+						{ id: 702, body: { malformed: true } },
+						ledgerComment(703, ledger(7, { decision: "warn" })),
+					]),
+				);
+			}
+			throw new Error(`unexpected URL ${url}`);
+		});
+		const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+		vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+		const exitCode = await runStats({ source: "github", repo: "acme/app", json: true }, "/workspace", {
+			fetch: fetchMock as unknown as GitHubFetch,
+			env: { GITHUB_API_URL: "https://api.github.test" },
+		});
+
+		expect(exitCode).toBe(0);
+		const report = JSON.parse(stdout.mock.calls.map(([message]) => String(message)).join("")) as {
+			rounds: number;
+			unparsable: Array<Record<string, unknown>>;
+		};
+		expect(report.rounds).toBe(2);
+		expect(report.unparsable).toEqual([
+			{
+				pr: 7,
+				commentId: 702,
+				line: null,
+				page: 1,
+				itemIndex: 1,
+				reason: "GitHub comments response item 1 is malformed",
+			},
+		]);
 	});
 });

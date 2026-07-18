@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -56,6 +56,65 @@ function gateReport(decision: "pass" | "block", verdict = blockingVerdict): Reco
 		override: null,
 		comment: { action: "update", commentId: 7 },
 	};
+}
+
+async function runActionWithStreamError(
+	streamName: "stdout" | "stderr",
+	presetExitCode?: number,
+): Promise<{ exitCode: number | null; signal: NodeJS.Signals | null; warningLog: string }> {
+	const directory = await mkdtemp(path.join(tmpdir(), "gatekeeper-action-stream-error-"));
+	try {
+		const eventPath = path.join(directory, "event.json");
+		const preloadPath = path.join(directory, "stream-error.mjs");
+		const warningPath = path.join(directory, "warning.log");
+		await writeFile(eventPath, "{broken", "utf8");
+		await writeFile(warningPath, "", "utf8");
+		await writeFile(
+			preloadPath,
+			`import { appendFileSync } from "node:fs";
+
+const streamName = process.env.GATEKEEPER_TEST_STREAM;
+const otherStream = streamName === "stdout" ? process.stderr : process.stdout;
+const originalWrite = otherStream.write.bind(otherStream);
+otherStream.write = (chunk, ...args) => {
+	appendFileSync(process.env.GATEKEEPER_TEST_WARNING_LOG, String(chunk));
+	return originalWrite(chunk, ...args);
+};
+
+process.once("beforeExit", () => {
+	if (process.env.GATEKEEPER_TEST_PRESET_EXIT_CODE !== undefined) {
+		process.exitCode = Number(process.env.GATEKEEPER_TEST_PRESET_EXIT_CODE);
+	}
+	const error = Object.assign(new Error("simulated stream failure"), { code: "EIO" });
+	process[streamName].emit("error", error);
+});
+`,
+			"utf8",
+		);
+		const child = spawn(process.execPath, ["--import", preloadPath, "--import", "tsx", "src/action.ts"], {
+			cwd: repoRoot,
+			env: {
+				...process.env,
+				INPUT_MODE: "gate",
+				"INPUT_REGISTRY-PATH": "/registry",
+				INPUT_ENFORCE: "hard",
+				"INPUT_GITHUB-TOKEN": "token",
+				GITHUB_EVENT_PATH: eventPath,
+				GITHUB_EVENT_NAME: "pull_request_target",
+				GITHUB_REPOSITORY: "acme/app",
+				GATEKEEPER_TEST_STREAM: streamName,
+				GATEKEEPER_TEST_WARNING_LOG: warningPath,
+				...(presetExitCode === undefined ? {} : { GATEKEEPER_TEST_PRESET_EXIT_CODE: String(presetExitCode) }),
+			},
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		child.stdout?.resume();
+		child.stderr?.resume();
+		const [exitCode, signal] = (await once(child, "close")) as [number | null, NodeJS.Signals | null];
+		return { exitCode, signal, warningLog: await readFile(warningPath, "utf8") };
+	} finally {
+		await rm(directory, { recursive: true, force: true });
+	}
 }
 
 afterEach(() => {
@@ -195,6 +254,22 @@ describe("Action fail-open/fail-closed boundary", () => {
 		} finally {
 			await rm(directory, { recursive: true, force: true });
 		}
+	});
+
+	it("does not crash when the action stdout stream emits non-EPIPE EIO", async () => {
+		const result = await runActionWithStreamError("stdout");
+
+		expect(result.signal).toBeNull();
+		expect(result.exitCode).toBe(0);
+		expect(result.warningLog).toContain("warning: Gatekeeper stdout stream error (EIO); preserving exit code");
+	});
+
+	it("preserves an existing action exit code when stderr emits non-EPIPE EIO", async () => {
+		const result = await runActionWithStreamError("stderr", 1);
+
+		expect(result.signal).toBeNull();
+		expect(result.exitCode).toBe(1);
+		expect(result.warningLog).toContain("warning: Gatekeeper stderr stream error (EIO); preserving exit code");
 	});
 
 	it("preserves a check-mode hard block when sticky comment creation fails", async () => {

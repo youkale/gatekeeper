@@ -13,21 +13,26 @@ import { runStats } from "./commands/stats.js";
 import { runTriage } from "./commands/triage.js";
 import { runValidate } from "./commands/validate.js";
 
-// EPIPE guard: when a consumer closes the read end of our pipe early
-// (e.g. `gatekeeper check --json | head -1`), the pending write fails with
-// EPIPE. Left unhandled that crashes Node with exit 1 and flips a
-// pass/warn/degraded outcome into a spurious failure — violating fail-open.
-// Exit with whatever verdict exit code was already decided (default 0).
-function guardAgainstEpipe(stream: NodeJS.WriteStream): void {
+// Stream failures are infrastructure degradation. Warn on the other stream
+// when possible, then preserve whatever verdict exit code was already set.
+function guardAgainstStreamErrors(
+	stream: NodeJS.WriteStream,
+	otherStream: NodeJS.WriteStream,
+	streamName: "stdout" | "stderr",
+): void {
 	stream.on("error", (error: NodeJS.ErrnoException) => {
-		if (error.code === "EPIPE") {
-			process.exit(process.exitCode ?? 0);
+		try {
+			otherStream.write(
+				`warning: Gatekeeper ${streamName} stream error${error.code ? ` (${error.code})` : ""}; preserving exit code\n`,
+			);
+		} catch {
+			// The warning is best-effort because the fallback stream may also be unavailable.
 		}
-		throw error;
+		process.exit(process.exitCode ?? 0);
 	});
 }
-guardAgainstEpipe(process.stdout);
-guardAgainstEpipe(process.stderr);
+guardAgainstStreamErrors(process.stdout, process.stderr, "stdout");
+guardAgainstStreamErrors(process.stderr, process.stdout, "stderr");
 
 const packageJsonPath = fileURLToPath(new URL("../package.json", import.meta.url));
 const { version } = JSON.parse(readFileSync(packageJsonPath, "utf8")) as { version: string };

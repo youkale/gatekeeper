@@ -557,16 +557,24 @@ export async function runAction(dependencies: ActionDependencies = {}): Promise<
 
 const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : undefined;
 if (invokedPath === fileURLToPath(import.meta.url)) {
-	function guardAgainstEpipe(stream: NodeJS.WriteStream): void {
+	function guardAgainstStreamErrors(
+		stream: NodeJS.WriteStream,
+		otherStream: NodeJS.WriteStream,
+		streamName: "stdout" | "stderr",
+	): void {
 		stream.on("error", (error: NodeJS.ErrnoException) => {
-			if (error.code === "EPIPE") {
-				process.exit(process.exitCode ?? 0);
+			try {
+				otherStream.write(
+					`warning: Gatekeeper ${streamName} stream error${error.code ? ` (${error.code})` : ""}; preserving exit code\n`,
+				);
+			} catch {
+				// The warning is best-effort because the fallback stream may also be unavailable.
 			}
-			throw error;
+			process.exit(process.exitCode ?? 0);
 		});
 	}
-	guardAgainstEpipe(process.stdout);
-	guardAgainstEpipe(process.stderr);
+	guardAgainstStreamErrors(process.stdout, process.stderr, "stdout");
+	guardAgainstStreamErrors(process.stderr, process.stdout, "stderr");
 
 	// Keep a literal entry-point catch in addition to runAction's boundary: a
 	// future setup regression must still fail open rather than escaping to Node.
