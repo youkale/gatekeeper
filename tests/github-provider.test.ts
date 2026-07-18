@@ -2,7 +2,13 @@ import { readFileSync } from "node:fs";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { type GitHubFetch, GitHubProvider, type GitHubPullRequestFile, InfraError } from "../src/providers/github.js";
+import {
+	type GitHubFetch,
+	GitHubProvider,
+	type GitHubPullRequest,
+	type GitHubPullRequestFile,
+	InfraError,
+} from "../src/providers/github.js";
 
 const fixtureDirectory = new URL("../fixtures/github/", import.meta.url);
 
@@ -44,6 +50,17 @@ function validFile(index: number): GitHubPullRequestFile {
 	};
 }
 
+function validPullRequest(index: number): GitHubPullRequest {
+	return {
+		number: index + 1,
+		body: null,
+		user: { login: `author-${index}` },
+		head: { ref: `feature-${index}`, sha: `head-${index}` },
+		base: { ref: "main", sha: "base-sha" },
+		labels: [],
+	};
+}
+
 beforeEach(() => {
 	vi.spyOn(globalThis, "fetch");
 });
@@ -68,6 +85,11 @@ describe("GitHubProvider payload validation", () => {
 			name: "pull request files",
 			payload: [{}],
 			invoke: (provider) => provider.getPullRequestFiles(42),
+		},
+		{
+			name: "pull requests associated with a commit",
+			payload: [{}],
+			invoke: (provider) => provider.findPullRequestsByHeadSha("head-sha"),
 		},
 		{
 			name: "pull request reviews",
@@ -146,6 +168,24 @@ describe("GitHubProvider payload validation", () => {
 });
 
 describe("GitHubProvider success and HTTP boundaries", () => {
+	it("finds pull requests by head SHA across every REST pagination page", async () => {
+		const firstPage = Array.from({ length: 100 }, (_, index) => validPullRequest(index));
+		const secondPage = [validPullRequest(100)];
+		const { provider, fetchMock } = providerWith((url) =>
+			jsonResponse(url.includes("page=2") ? secondPage : firstPage),
+		);
+
+		const result = await provider.findPullRequestsByHeadSha("head/sha");
+
+		expect(result).toHaveLength(101);
+		expect(result[100]?.number).toBe(101);
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(fetchMock.mock.calls[0]?.[0]).toContain(
+			"/repos/acme/gatekeeper/commits/head%2Fsha/pulls?per_page=100&page=1",
+		);
+		expect(fetchMock.mock.calls[1]?.[0]).toContain("page=2");
+	});
+
 	it("accepts a recorded REST review fixture through an injected fetch", async () => {
 		const reviews = jsonFixture<unknown[]>("reviews.json");
 		const { provider, fetchMock } = providerWith(() => jsonResponse(reviews));
