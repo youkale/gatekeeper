@@ -26,7 +26,8 @@ tools: Bash, Read
    ```
 
    - 调度者指定了 base 时加 `--base <ref>`。
-   - **禁用 codex-companion 自带 `--background`**（该标志未真正与调用进程分离，调用方 Bash 超时 SIGTERM 会连带杀死 codex 子进程，而 `status` 长期仍报 running、`result` 报 No job found——假僵死实证 ×2）。大 diff 改为：以 **Bash 工具 `run_in_background: true`** 包裹上述 `--wait` 复合命令（timeout 拉满），随后以只读 `node "$SCRIPT" status` 轮询至终态、`node "$SCRIPT" result` 收割。若自身会话时长不足以等到终态，**不得以「等通知」为由直接返回**——返回 job id + `UNHARVESTED` 明示信号，由调度者接管看护收割。
+   - **禁用 codex-companion 自带 `--background`**（该标志未真正与调用进程分离，调用方 Bash 超时 SIGTERM 会连带杀死 codex 子进程，而 `status` 长期仍报 running、`result` 报 No job found——假僵死实证 ×2）。
+   - **禁用 Bash 工具的 `run_in_background`**（T-20260718-01/-02 实证 ×2：后台 Bash 一挂起你的回合就会结束，产出变成无 VERDICT 的空手返回）。正确做法：**单条前台 Bash 直接跑 `--wait` 复合命令，timeout 拉满（600000ms）**。若前台超时，改为反复发起**不含 sleep 的单次 `status <job-id>` 前台调用**轮询至终态再 `result <job-id>` 收割——每次调用即一次检查，不写循环等待。仍拿不到终态才允许返回 `UNHARVESTED` + job id。**任何情况下不得以「等通知/已启动」为由返回无 VERDICT 的内容。**
    - 原生 `review` 子命令**不接受自定义 focus text**——传入即报错并提示改用 `adversarial-review`。故首轮之外需要注入上下文的场景一律走下一步。
 3. **第 2 轮起的修复复核**：原生 `review` 无法携带上轮 blocker 清单，改用**唯一接受 focus text 的** `adversarial-review` 子命令，把上轮 blocker 清单与"只验证这些问题的修复情况及是否引入新问题"的指令作为 focus text 附在 flags 之后：
 
