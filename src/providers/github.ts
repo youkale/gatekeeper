@@ -83,6 +83,17 @@ export interface GitHubPullRequest {
 	html_url?: string;
 }
 
+export interface GitHubIssue {
+	number: number;
+	title: string;
+	body: string | null;
+	user: GitHubUser | null;
+	labels: GitHubLabel[];
+	created_at?: string;
+	updated_at?: string;
+	html_url?: string;
+}
+
 export interface GitHubPullRequestFile {
 	sha: string;
 	filename: string;
@@ -178,7 +189,7 @@ export interface GitHubProviderOptions {
 }
 
 interface RequestOptions {
-	method?: "GET" | "POST" | "PATCH";
+	method?: "GET" | "POST" | "PATCH" | "DELETE";
 	body?: unknown;
 	operation: string;
 }
@@ -330,6 +341,21 @@ function validatePullRequest(value: unknown, path: string): GitHubPullRequest {
 	optionalStringValue(pullRequest.updated_at, `${path}.updated_at`);
 	optionalStringValue(pullRequest.html_url, `${path}.html_url`);
 	return value as unknown as GitHubPullRequest;
+}
+
+function validateIssue(value: unknown, path: string): GitHubIssue {
+	const issue = recordValue(value, path);
+	integerValue(issue.number, `${path}.number`, 1);
+	stringValue(issue.title, `${path}.title`, true);
+	nullableStringValue(issue.body, `${path}.body`);
+	validateUser(issue.user, `${path}.user`);
+	for (const [index, label] of arrayValue(issue.labels, `${path}.labels`).entries()) {
+		validateLabel(label, `${path}.labels[${index}]`);
+	}
+	optionalStringValue(issue.created_at, `${path}.created_at`);
+	optionalStringValue(issue.updated_at, `${path}.updated_at`);
+	optionalStringValue(issue.html_url, `${path}.html_url`);
+	return value as unknown as GitHubIssue;
 }
 
 function validatePullRequestFile(value: unknown, path: string): GitHubPullRequestFile {
@@ -515,6 +541,16 @@ export class GitHubProvider {
 		);
 	}
 
+	async getIssue(issueNumber: number): Promise<GitHubIssue> {
+		return this.requestObject<GitHubIssue>(
+			`/issues/${this.integer(issueNumber, "issue")}`,
+			{
+				operation: `read issue #${issueNumber}`,
+			},
+			validateIssue,
+		);
+	}
+
 	async getPullRequestFiles(pullNumber: number): Promise<GitHubPullRequestFile[]> {
 		return this.paginateArray<GitHubPullRequestFile>(
 			`/pulls/${this.integer(pullNumber, "pull request")}/files`,
@@ -568,6 +604,28 @@ export class GitHubProvider {
 			`read labels for pull request #${pullNumber}`,
 			validateLabel,
 		);
+	}
+
+	async addIssueLabels(issueNumber: number, labels: string[]): Promise<GitHubLabel[]> {
+		return this.requestArray<GitHubLabel>(
+			`/issues/${this.integer(issueNumber, "issue")}/labels`,
+			{
+				method: "POST",
+				body: { labels },
+				operation: `add labels to issue #${issueNumber}`,
+			},
+			validateLabel,
+		);
+	}
+
+	/** Idempotent: a label that is already absent (HTTP 404) counts as success, not a fault. */
+	async removeIssueLabel(issueNumber: number, label: string): Promise<void> {
+		const encodedLabel = encodeURIComponent(this.component(label, "label name"));
+		await this.requestVoid(`/issues/${this.integer(issueNumber, "issue")}/labels/${encodedLabel}`, {
+			method: "DELETE",
+			operation: `remove label ${JSON.stringify(label)} from issue #${issueNumber}`,
+			treatNotFoundAsSuccess: true,
+		});
 	}
 
 	async getBranchProtectionRequiredChecks(branch: string): Promise<RequiredChecksResult> {
@@ -857,6 +915,89 @@ export class GitHubProvider {
 					cause: error,
 				});
 			}
+		}
+	}
+
+	/**
+	 * Like requestJson, but for endpoints that return no body (e.g. DELETE ->
+	 * 204). Never parses a response body; `treatNotFoundAsSuccess` lets
+	 * idempotent deletes (label already gone) succeed silently on 404.
+	 */
+	private async requestVoid(
+		path: string,
+		options: RequestOptions & { treatNotFoundAsSuccess?: boolean },
+	): Promise<void> {
+		const method = options.method ?? "GET";
+		const url = `${this.apiBase}${this.repoPath(path)}`;
+		const headers: Record<string, string> = {
+			Accept: "application/vnd.github+json",
+			"X-GitHub-Api-Version": "2022-11-28",
+		};
+		if (this.token) {
+			headers.Authorization = `Bearer ${this.token}`;
+		}
+
+		for (let attempt = 0; ; attempt += 1) {
+			let response: Response;
+			try {
+				response = await this.fetch(url, { method, headers });
+			} catch (error) {
+				throw new InfraError(`${options.operation}: GitHub request failed: ${describeError(error)}`, {
+					kind: "network",
+					operation: options.operation,
+					method,
+					url,
+					cause: error,
+				});
+			}
+
+			if (response.ok) {
+				return;
+			}
+			if (options.treatNotFoundAsSuccess && response.status === 404) {
+				return;
+			}
+
+			let responseBody: string;
+			try {
+				responseBody = await response.text();
+			} catch (error) {
+				throw new InfraError(`${options.operation}: failed to read GitHub response: ${describeError(error)}`, {
+					kind: "network",
+					operation: options.operation,
+					method,
+					url,
+					status: response.status,
+					cause: error,
+				});
+			}
+
+			if (attempt < this.maxRetries && isSecondaryRateLimit(response, responseBody)) {
+				try {
+					await this.wait(retryAfterMilliseconds(response, attempt, this.retryDelayMs));
+				} catch (error) {
+					throw new InfraError(`${options.operation}: rate-limit backoff failed: ${describeError(error)}`, {
+						kind: "network",
+						operation: options.operation,
+						method,
+						url,
+						status: response.status,
+						cause: error,
+					});
+				}
+				continue;
+			}
+
+			const excerpt = responseExcerpt(responseBody);
+			const suffix = excerpt.length > 0 ? `: ${excerpt}` : "";
+			throw new InfraError(`${options.operation}: GitHub returned HTTP ${response.status}${suffix}`, {
+				kind: "http",
+				operation: options.operation,
+				method,
+				url,
+				status: response.status,
+				responseBody: excerpt,
+			});
 		}
 	}
 }

@@ -13,7 +13,7 @@
 | T-20260718-04 | M4 | Action 与工作流：action.yml + tsup 打包 + 参考 workflow + audit/stats（规格：docs/designs/M4-action.md） | codex | R1: codex 通道假僵死→降级（claude FAIL + grok FAIL 各 1）；R2: 双 PASS（2 轮） | ✅ 验收提交 | records/T-20260718-04-m4-action.md |
 | T-20260718-05 | M5 | init 委托版：scan/brief/init 命令（规格：docs/designs/M5-init.md） | sonnet-coder | R1: 三路全 FAIL（各独家）；R2: claude/grok PASS + codex 3 新项；R3: 双 PASS（3 轮） | ✅ 验收提交 | records/T-20260718-05-m5-init.md |
 
-| T-20260718-06 | M6 | 需求门 + 角色-模型选型策略（规格：docs/designs/M6-triage.md） | sonnet-coder | DISPATCH | 进行中 | - |
+| T-20260718-06 | M6 | 需求门 + 角色-模型选型策略（规格：docs/designs/M6-triage.md） | sonnet-coder | R1: claude PASS + codex FAIL(6) + grok FAIL(1)；R2: codex FAIL(3)；R3: codex FAIL(1)→仲裁外科修复→单点确认+测试收口（4 轮） | ✅ 验收提交 | records/T-20260718-06-m6-triage.md |
 | T-20260718-07 | M7 | pi extension + 角色包（规格：docs/designs/M7-pi-extension.md） | grok-coder | R1: codex FAIL(3)+claude FAIL(3)（isError 死字段经宿主源码取证）；R2: 双 PASS（2 轮） | ✅ 验收提交 | records/T-20260718-07-m7-pi-extension.md |
 
 ### 遗留债队列（活动）

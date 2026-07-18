@@ -109,6 +109,16 @@ describe("GitHubProvider payload validation", () => {
 			payload: {},
 			invoke: (provider) => provider.updateIssueComment(9001, "verdict"),
 		},
+		{
+			name: "issue",
+			payload: {},
+			invoke: (provider) => provider.getIssue(42),
+		},
+		{
+			name: "added labels",
+			payload: [{}],
+			invoke: (provider) => provider.addIssueLabels(42, ["gatekeeper:accepted"]),
+		},
 	])("turns a malformed 2xx $name payload into InfraError", async ({ payload, invoke }) => {
 		const { provider } = providerWith(() => jsonResponse(payload));
 		await expect(invoke(provider)).rejects.toMatchObject({
@@ -169,5 +179,29 @@ describe("GitHubProvider success and HTTP boundaries", () => {
 		}
 		expect(thrown).toBeInstanceOf(InfraError);
 		expect(thrown).toMatchObject({ kind: "http", status: 500 });
+	});
+});
+
+describe("GitHubProvider.removeIssueLabel (idempotent delete)", () => {
+	it("succeeds on a 204 No Content response without attempting to parse a body", async () => {
+		const { provider, fetchMock } = providerWith(() => new Response(null, { status: 204 }));
+		await expect(provider.removeIssueLabel(42, "gatekeeper:needs-info")).resolves.toBeUndefined();
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(fetchMock.mock.calls[0]?.[0]).toContain("/repos/acme/gatekeeper/issues/42/labels/gatekeeper%3Aneeds-info");
+		expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ method: "DELETE" });
+	});
+
+	it("treats a 404 (label already absent) as success -- safe to call again after a partial failure", async () => {
+		const { provider } = providerWith(() => jsonResponse({ message: "Label does not exist" }, 404));
+		await expect(provider.removeIssueLabel(42, "gatekeeper:accepted")).resolves.toBeUndefined();
+	});
+
+	it("still raises InfraError for a genuine failure (not silently swallowed)", async () => {
+		const { provider } = providerWith(() => jsonResponse({ message: "server failed" }, 500));
+		await expect(provider.removeIssueLabel(42, "gatekeeper:accepted")).rejects.toMatchObject({
+			name: "InfraError",
+			kind: "http",
+			status: 500,
+		});
 	});
 });

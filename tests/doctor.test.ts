@@ -2,9 +2,9 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { runDoctor } from "../src/commands/doctor.js";
+import { rolesPolicyCapabilityCheck, runDoctor } from "../src/commands/doctor.js";
 
 describe("doctor fail direction and required checks", () => {
 	let registryDirectory: string;
@@ -153,5 +153,208 @@ levels: {}
 		} finally {
 			await rm(invalidRegistry, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("rolesPolicyCapabilityCheck", () => {
+	let cwd: string;
+	let piConfigDir: string;
+
+	beforeEach(async () => {
+		cwd = await mkdtemp(path.join(tmpdir(), "gatekeeper-doctor-roles-cwd-"));
+		piConfigDir = await mkdtemp(path.join(tmpdir(), "gatekeeper-doctor-roles-pi-"));
+	});
+
+	afterEach(async () => {
+		await rm(cwd, { recursive: true, force: true });
+		await rm(piConfigDir, { recursive: true, force: true });
+	});
+
+	it("falls back to the package-shipped roles-policy.yaml when the cwd has none, and actually evaluates it", async () => {
+		// no roles-policy.yaml written into cwd -- and piConfigDir points nowhere, so
+		// availability is unknown and no tier can be escalated to an error. If the
+		// fallback failed to resolve a real file, this would surface as a distinct
+		// "无法读取 roles-policy" warning instead of the tier warnings asserted below.
+		const check = rolesPolicyCapabilityCheck(cwd, { piConfigDir: path.join(piConfigDir, "does-not-exist") });
+		const result = await check.run();
+
+		expect(result.errors ?? []).toEqual([]);
+		expect(result.warnings?.some((warning) => warning.includes("无法读取 pi 认证配置"))).toBe(true);
+		expect(result.warnings?.some((warning) => warning.includes("无法读取 roles-policy"))).toBe(false);
+		// The shipped file declares three tiers; each contributes its own warning when
+		// availability is unknown, proving the real multi-tier file was actually loaded
+		// and processed (not silently skipped).
+		expect((result.warnings ?? []).length).toBeGreaterThanOrEqual(4);
+	});
+
+	it("prefers a cwd-local roles-policy.yaml override over the package-shipped file", async () => {
+		// This override deliberately omits the deep-reasoner tier the shipped file has --
+		// its absence from the output proves the override took effect.
+		await writeFile(
+			path.join(cwd, "roles-policy.yaml"),
+			`apiVersion: gatekeeper/v1
+tiers:
+  coder:
+    prefer: ["acme/only-model"]
+`,
+			"utf8",
+		);
+		await writeFile(path.join(piConfigDir, "auth.json"), "{}", "utf8");
+
+		const check = rolesPolicyCapabilityCheck(cwd, { piConfigDir });
+		const result = await check.run();
+
+		expect(result.errors ?? []).toEqual([]);
+		expect(result.warnings?.some((warning) => warning.includes("deep-reasoner"))).toBe(false);
+		expect(result.warnings?.some((warning) => warning.includes("coder tier has no available model"))).toBe(true);
+	});
+
+	it("degrades to a warning (not an error) when roles-policy.yaml is missing everywhere", async () => {
+		const check = rolesPolicyCapabilityCheck(cwd, {
+			rolesPolicyPath: path.join(cwd, "nonexistent-roles-policy.yaml"),
+			piConfigDir,
+		});
+		const result = await check.run();
+
+		expect(result.errors ?? []).toEqual([]);
+		expect(result.warnings?.some((warning) => warning.includes("无法读取 roles-policy"))).toBe(true);
+	});
+
+	it("escalates to an error when roles-policy.yaml exists but fails to parse (not silently downgraded)", async () => {
+		await writeFile(path.join(cwd, "roles-policy.yaml"), "tiers: [", "utf8");
+
+		const check = rolesPolicyCapabilityCheck(cwd, { piConfigDir });
+		const result = await check.run();
+
+		expect(result.errors?.length ?? 0).toBeGreaterThan(0);
+		expect((result.warnings ?? []).some((warning) => warning.includes("无法读取 roles-policy"))).toBe(false);
+	});
+
+	it("errors when the deep-reasoner tier has zero available models under a known pi config", async () => {
+		await writeFile(
+			path.join(cwd, "roles-policy.yaml"),
+			`apiVersion: gatekeeper/v1
+tiers:
+  deep-reasoner:
+    prefer: ["acme/only-model"]
+`,
+			"utf8",
+		);
+		await writeFile(path.join(piConfigDir, "auth.json"), "{}", "utf8");
+
+		const check = rolesPolicyCapabilityCheck(cwd, { piConfigDir });
+		const result = await check.run();
+
+		expect(result.errors?.length ?? 0).toBeGreaterThan(0);
+	});
+
+	it("warns (not errors, not silent OK) when the deep-reasoner tier has only model-level-unconfirmed candidates", async () => {
+		await writeFile(
+			path.join(cwd, "roles-policy.yaml"),
+			`apiVersion: gatekeeper/v1
+tiers:
+  deep-reasoner:
+    prefer: ["acme/only-model"]
+`,
+			"utf8",
+		);
+		// acme is credentialed (vendor-level only, no models.json) -- deep-reasoner has a
+		// selection, but it cannot be model-level-confirmed.
+		await writeFile(path.join(piConfigDir, "auth.json"), JSON.stringify({ acme: { apiKey: "x" } }), "utf8");
+
+		const check = rolesPolicyCapabilityCheck(cwd, { piConfigDir });
+		const result = await check.run();
+
+		expect(result.errors ?? []).toEqual([]);
+		expect(result.warnings?.some((warning) => warning.includes("model-level-unconfirmed"))).toBe(true);
+	});
+
+	it("neither warns nor errors on deep-reasoner beyond ordinary tier warnings when a selection is models.json-confirmed", async () => {
+		await writeFile(
+			path.join(cwd, "roles-policy.yaml"),
+			`apiVersion: gatekeeper/v1
+tiers:
+  deep-reasoner:
+    prefer: ["acme/only-model"]
+`,
+			"utf8",
+		);
+		await writeFile(path.join(piConfigDir, "auth.json"), JSON.stringify({ acme: { apiKey: "x" } }), "utf8");
+		// Real pi models.json shape: providers.<vendor>.models[].id, not a flat string[].
+		await writeFile(
+			path.join(piConfigDir, "models.json"),
+			JSON.stringify({ providers: { acme: { models: [{ id: "only-model" }] } } }),
+			"utf8",
+		);
+
+		const check = rolesPolicyCapabilityCheck(cwd, { piConfigDir });
+		const result = await check.run();
+
+		expect(result.errors ?? []).toEqual([]);
+		expect(result.warnings?.some((warning) => warning.includes("model-level-unconfirmed"))).toBe(false);
+	});
+
+	it("parses a real JSONC-shaped models.json (comments, trailing commas) end-to-end through the capability check", async () => {
+		await writeFile(
+			path.join(cwd, "roles-policy.yaml"),
+			`apiVersion: gatekeeper/v1
+tiers:
+  deep-reasoner:
+    prefer: ["acme/only-model"]
+`,
+			"utf8",
+		);
+		await writeFile(path.join(piConfigDir, "auth.json"), JSON.stringify({ acme: { apiKey: "x" } }), "utf8");
+		await writeFile(
+			path.join(piConfigDir, "models.json"),
+			`{
+  // acme is a local/custom provider
+  "providers": {
+    "acme": {
+      "baseUrl": "http://localhost:9999/v1", // double-slash inside a string, must not be treated as a comment
+      "models": [
+        { "id": "only-model" }, /* trailing comment */
+      ],
+    },
+  },
+}`,
+			"utf8",
+		);
+
+		const check = rolesPolicyCapabilityCheck(cwd, { piConfigDir });
+		const result = await check.run();
+
+		expect(result.errors ?? []).toEqual([]);
+		expect(result.warnings?.some((warning) => warning.includes("model-level-unconfirmed"))).toBe(false);
+	});
+
+	it("[regression] a models.json confirmation counts even when auth.json is entirely missing -- no false 'no available model' error", async () => {
+		await writeFile(
+			path.join(cwd, "roles-policy.yaml"),
+			`apiVersion: gatekeeper/v1
+tiers:
+  deep-reasoner:
+    prefer: ["acme/only-model"]
+`,
+			"utf8",
+		);
+		// auth.json is deliberately never written -- piConfigDir has only models.json.
+		await writeFile(
+			path.join(piConfigDir, "models.json"),
+			JSON.stringify({ providers: { acme: { models: [{ id: "only-model" }] } } }),
+			"utf8",
+		);
+
+		const check = rolesPolicyCapabilityCheck(cwd, { piConfigDir });
+		const result = await check.run();
+
+		// Before the fix, loadPiProviderAvailability's early return on the missing auth.json
+		// meant models.json was never even read, so deep-reasoner would have zero selections
+		// and wrongly escalate to an error here.
+		expect(result.errors ?? []).toEqual([]);
+		expect(result.warnings?.some((warning) => warning.includes("无法读取 pi 认证配置"))).toBe(true);
+		expect(result.warnings?.some((warning) => warning.includes("models.json 的显式确认仍生效"))).toBe(true);
+		expect(result.warnings?.some((warning) => warning.includes("model-level-unconfirmed"))).toBe(false);
+		expect(result.warnings?.some((warning) => warning.includes("no available model"))).toBe(false);
 	});
 });

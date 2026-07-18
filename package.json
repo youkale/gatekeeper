@@ -12,7 +12,8 @@
     "dist",
     "lanes.d",
     "schema",
-    "action.yml"
+    "action.yml",
+    "roles-policy.yaml"
   ],
   "engines": {
     "node": ">=20"

@@ -1,0 +1,17 @@
+apiVersion: gatekeeper/v1
+# Role -> model tier preferences for pi-subagents dispatch. Data-only: this
+# file never causes a model call by itself (product-wide zero-model
+# invariant) -- it only tells `gatekeeper triage`/`gatekeeper doctor` which
+# model id a role tier prefers, in priority order, intersected against
+# whatever providers pi is actually configured with (src/roles/policy.ts).
+# Ships alongside the CLI package, same "independently versionable data
+# file" posture as lanes.d/.
+tiers:
+  deep-reasoner:            # top reasoning tier: requirement-gate judgement + dispatch planning
+    prefer: ["anthropic/claude-fable-5", "anthropic/claude-opus-4-8", "openai/gpt-5.6-sol"]
+  coder:                    # implementation tier: dispatched by deep-reasoner per task
+    prefer: ["openai/gpt-5.4-codex", "anthropic/claude-sonnet-5"]
+  reviewer:                 # review tier: default two-lane, cross-vendor to avoid same-source blind spots
+    prefer: ["openai/gpt-5.4-codex", "anthropic/claude-opus-4-8", "xai/grok-5-code"]
+    count: 2
+    cross_vendor: true

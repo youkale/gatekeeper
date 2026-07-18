@@ -6,9 +6,11 @@ import { Command, CommanderError, InvalidArgumentError, Option } from "commander
 
 import { runAudit } from "./commands/audit.js";
 import { runCheck } from "./commands/check.js";
-import { runDoctor } from "./commands/doctor.js";
+import { rolesPolicyCapabilityCheck, runDoctor } from "./commands/doctor.js";
 import { runGate } from "./commands/gate.js";
+import { registerInitCommand } from "./commands/init.js";
 import { runStats } from "./commands/stats.js";
+import { runTriage } from "./commands/triage.js";
 import { runValidate } from "./commands/validate.js";
 
 // EPIPE guard: when a consumer closes the read end of our pipe early
@@ -112,7 +114,8 @@ program
 	.option("--workflow <path>", "workflow file or directory (defaults to .github/workflows)")
 	.option("--check-name <name>", "expected required check name (repeatable; bypasses workflow discovery)", collect, [])
 	.action(async (options) => {
-		process.exitCode = await runDoctor(options, process.cwd());
+		const cwd = process.cwd();
+		process.exitCode = await runDoctor(options, cwd, { capabilityChecks: [rolesPolicyCapabilityCheck(cwd)] });
 	});
 
 program
@@ -142,6 +145,23 @@ program
 	.action(async (options) => {
 		process.exitCode = await runStats(options, process.cwd());
 	});
+
+program
+	.command("triage")
+	.description(
+		"Assemble a requirement-gate triage briefing for a GitHub issue, or post a completed judgement back to it.",
+	)
+	.requiredOption("--issue <n>", "issue number", positiveInteger)
+	.requiredOption("--repo <org/name>", "GitHub repository")
+	.requiredOption("--registry <dir>", "path to the registry directory")
+	.option("--post", "post a completed --verdict-file judgement back to the issue instead of printing a briefing", false)
+	.option("--verdict-file <path>", "path to a completed judgement JSON file (required with --post)")
+	.option("--actor <name>", "explicit actor identity recorded on the posted comment")
+	.action(async (options) => {
+		process.exitCode = await runTriage(options, process.cwd());
+	});
+
+registerInitCommand(program);
 
 try {
 	await program.parseAsync(process.argv);

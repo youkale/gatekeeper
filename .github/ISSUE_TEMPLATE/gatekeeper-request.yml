@@ -1,0 +1,46 @@
+name: Gatekeeper 需求
+description: 面向 Gatekeeper 需求门（triage）的结构化提报——描述要做什么、为什么、影响哪些 repo。
+title: "[gatekeeper] "
+labels:
+  - gatekeeper:triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        本表单会被 `gatekeeper triage` 拉取并交给 deep-reasoner 角色判断（是否做/建议级别/派工方案）。
+        请尽量具体，尤其是「影响 repo」字段——判定会据此与契约注册表求交集，生成消费方波及图。
+  - type: textarea
+    id: description
+    attributes:
+      label: 需求描述
+      description: 要做什么？期望的最终状态是什么？
+      placeholder: 例如：为 checkout-service 新增 X 字段并同步给 billing-service。
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: 动机
+      description: 为什么现在要做？不做的后果是什么？是否已有契约覆盖？
+    validations:
+      required: true
+  - type: input
+    id: affected-repos
+    attributes:
+      label: 影响 repo
+      description: 逗号分隔的 org/repo 列表（尽量精确，用于消费方波及图的文本匹配）。
+      placeholder: acme/checkout-service, acme/billing-service
+    validations:
+      required: false
+  - type: dropdown
+    id: expected-level
+    attributes:
+      label: 期望级别
+      description: 若已知目标契约的 enforcement 级别，选择最接近的一项；不确定可留空，由 deep-reasoner 判断。
+      options:
+        - block
+        - warn
+        - 不确定
+      default: 2
+    validations:
+      required: false
