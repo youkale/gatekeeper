@@ -13,6 +13,9 @@
 | T-20260718-04 | M4 | Action 与工作流：action.yml + tsup 打包 + 参考 workflow + audit/stats（规格：docs/designs/M4-action.md） | codex | R1: codex 通道假僵死→降级（claude FAIL + grok FAIL 各 1）；R2: 双 PASS（2 轮） | ✅ 验收提交 | records/T-20260718-04-m4-action.md |
 | T-20260718-05 | M5 | init 委托版：scan/brief/init 命令（规格：docs/designs/M5-init.md） | sonnet-coder | R1: 三路全 FAIL（各独家）；R2: claude/grok PASS + codex 3 新项；R3: 双 PASS（3 轮） | ✅ 验收提交 | records/T-20260718-05-m5-init.md |
 
+| T-20260718-06 | M6 | 需求门 + 角色-模型选型策略（规格：docs/designs/M6-triage.md） | sonnet-coder | DISPATCH | 进行中 | - |
+| T-20260718-07 | M7 | pi extension + 角色包（规格：docs/designs/M7-pi-extension.md） | grok-coder | DISPATCH（grok 编码首战） | 进行中 | - |
+
 ### 遗留债队列（活动）
 
 - [T-04] codex review 通道假僵死（job review-mrpu7bo3-ssj802）→ M4 R1 按降级链以 claude(opus) + grok 双路成立；**通道恢复后补一轮 codex 增量 review（M4 全量 diff）**

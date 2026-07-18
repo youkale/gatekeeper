@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,6 +16,49 @@ const collisionParentBRoot = fileURLToPath(new URL("../fixtures/init-scan/collis
 
 function byType(signals: Signal[], type: Signal["type"]): Signal[] {
 	return signals.filter((signal) => signal.type === type);
+}
+
+/**
+ * A nested ".git" directory can never be a tracked fixture (git refuses to track anything named
+ * ".git"), and a "node_modules" fixture directory is excluded by this repo's own .gitignore -- so
+ * neither can live as a static file under fixtures/init-scan/ without silently vanishing on a fresh
+ * clone (the exact failure this helper exists to avoid). Instead, copy the tracked repo-a fixture into
+ * a temp dir and graft on both paths at test time, so the tests that specifically exercise dot-directory
+ * / node_modules exclusion never depend on anything outside git's index.
+ *
+ * The .git canary is deliberately a *.js file (".git/hooks/pre-commit.js"), not an extension-less file
+ * like ".git/config": isConstantScanCandidate only scans files whose extension/basename is on its
+ * allowlist, so an extension-less canary would never be scanned for constants regardless of whether the
+ * dot-directory skip works -- making the dot-directory exclusion assertions vacuously true even with
+ * that skip logic disabled. A *.js canary is unambiguously a path the constant scanner would process if
+ * the .git skip were the only thing standing in the way, so a broken skip is guaranteed to surface it.
+ */
+async function withUntrackableRepoAExtras<T>(run: (tmpRepoARoot: string) => Promise<T>): Promise<T> {
+	const tmpDir = await mkdtemp(path.join(tmpdir(), "gatekeeper-init-scan-untrackable-"));
+	try {
+		const tmpRepoA = path.join(tmpDir, "repo-a");
+		await cp(repoARoot, tmpRepoA, { recursive: true });
+
+		await mkdir(path.join(tmpRepoA, ".git", "hooks"), { recursive: true });
+		await writeFile(
+			path.join(tmpRepoA, ".git", "hooks", "pre-commit.js"),
+			"// fake git hook for fixture purposes only -- not a real git repo.\n" +
+				"// This value must never surface in scan output: .git is always skipped.\n" +
+				'const IGNORED_HEADER = "X-Ignored-Header";\n',
+			"utf8",
+		);
+
+		await mkdir(path.join(tmpRepoA, "node_modules", "dep"), { recursive: true });
+		await writeFile(
+			path.join(tmpRepoA, "node_modules", "dep", "index.js"),
+			'module.exports = { header: "X-Request-Id" };\n',
+			"utf8",
+		);
+
+		return await run(tmpRepoA);
+	} finally {
+		await rm(tmpDir, { recursive: true, force: true });
+	}
 }
 
 afterEach(() => {
@@ -105,22 +148,26 @@ describe("scanRepos", () => {
 		});
 
 		it("excludes a constant whose only second occurrence lives inside a skipped dot-directory (.git)", async () => {
-			const scan = await scanRepos([repoARoot, repoBRoot]);
-			const shared = byType(scan.signals, "shared-constant");
+			await withUntrackableRepoAExtras(async (tmpRepoARoot) => {
+				const scan = await scanRepos([tmpRepoARoot, repoBRoot]);
+				const shared = byType(scan.signals, "shared-constant");
 
-			// repo-a's copy of X-Ignored-Header lives under .git/config (skipped);
-			// repo-b's copy in src/server.py is therefore the only real occurrence,
-			// so the >=2-repo intersection rule must keep it out entirely.
-			expect(shared.some((signal) => signal.match?.value === "X-Ignored-Header")).toBe(false);
+				// repo-a's copy of X-Ignored-Header lives under .git/hooks/pre-commit.js (skipped);
+				// repo-b's copy in src/server.py is therefore the only real occurrence,
+				// so the >=2-repo intersection rule must keep it out entirely.
+				expect(shared.some((signal) => signal.match?.value === "X-Ignored-Header")).toBe(false);
+			});
 		});
 	});
 
 	describe("dot-directory and node_modules exclusion", () => {
 		it("never descends into .git or node_modules", async () => {
-			const scan = await scanRepos([repoARoot, repoBRoot]);
+			await withUntrackableRepoAExtras(async (tmpRepoARoot) => {
+				const scan = await scanRepos([tmpRepoARoot, repoBRoot]);
 
-			expect(scan.signals.some((signal) => signal.path.includes(".git/"))).toBe(false);
-			expect(scan.signals.some((signal) => signal.path.includes("node_modules/"))).toBe(false);
+				expect(scan.signals.some((signal) => signal.path.includes(".git/"))).toBe(false);
+				expect(scan.signals.some((signal) => signal.path.includes("node_modules/"))).toBe(false);
+			});
 		});
 
 		it("still descends into .github (the one dot-directory exception) to find workflow files", async () => {
