@@ -7,7 +7,8 @@ name: Gatekeeper Selfgate
 #
 #   `gatekeeper-selfgate`     The actual gate, mirroring the security shape
 #                             of examples/workflows/gatekeeper-gate.yml: it
-#                             runs on `pull_request_target` (+ check_suite)
+#                             runs on `pull_request_target` (+ check_suite
+#                             + workflow_run)
 #                             so it can carry a write-capable token, and it
 #                             therefore MUST NEVER build or execute PR head
 #                             code. It only checks out this repo's trusted
@@ -22,6 +23,10 @@ name: Gatekeeper Selfgate
 #   `gatekeeper-selfgate-     Best-effort staleness backstop on a `schedule`
 #     schedule`               cron (see the job below for why one is
 #                             needed and what it does and does not cover).
+#                             Also manually triggerable via
+#                             `workflow_dispatch` (T-20260718-10) for
+#                             real-runner integration testing without
+#                             waiting on the cron interval.
 #
 # The ordinary typecheck/test/biome/check:governance CI job lives in the
 # separate .github/workflows/ci.yml file instead of here -- see the
@@ -54,8 +59,12 @@ name: Gatekeeper Selfgate
 # `permissions:` requested below. This file's `on:` therefore never lists
 # any PR-content-loaded event at all: only `pull_request_target`
 # (workflow definition loads from the base branch by design),
-# `check_suite` (no PR-authored workflow content involved), and `schedule`
-# (always the default branch's latest commit).
+# `check_suite` (no PR-authored workflow content involved), `workflow_run`
+# (definition loads from the default branch), `schedule` (always the default
+# branch's latest commit), and `workflow_dispatch`
+# (T-20260718-10; always dispatched against, and therefore always loaded
+# from, an explicitly chosen ref -- the default branch here -- same trust
+# class as `schedule`).
 #
 # SECURITY NOTE 2 -- required-check deployment: do NOT wire this up with a
 # classic branch-protection "required status check" matched by name (e.g.
@@ -70,16 +79,26 @@ name: Gatekeeper Selfgate
 # that binds enforcement to the workflow FILE's identity, not a spoofable
 # name string. See README.md's "Required check setup" section.
 #
-# SECURITY NOTE 3 -- staleness is a real stale-PASS window, not just a
-# delay: removing `pull_request_review` means a review dismissal or a new
-# CHANGES_REQUESTED review on an already-gated SHA does not by itself
-# retrigger `gatekeeper-selfgate`. If the gate already went green at that
-# SHA, it STAYS green (GitHub does not retroactively fail an already-
-# passed check) until something recomputes it -- a push, a label toggle, a
-# check-suite completion, or the `gatekeeper-selfgate-schedule` cron below.
-# A merge attempted inside that window would see a real, but stale, green
-# check. This is NOT merely "delays showing a new pass" -- it is a genuine
-# window where withdrawn/downgraded review evidence is not yet reflected.
+# SECURITY NOTE 3 -- best-effort review-event relay: the checked-in version of
+# `.github/workflows/review-ping.yml` requests no permissions and only emits an
+# event pulse. But `pull_request_review` loads that workflow from the PR merge
+# commit, so the PR can rewrite or delete it, change its name/permissions/steps,
+# or prevent completion. A matching `workflow_run` therefore exists only when
+# the PR-controlled bridge is not suppressed. This workflow ignores the
+# upstream content and conclusion; when a matching completion does arrive, it
+# loads THIS enforcing workflow from the default branch and the Action resolves
+# the PR from `workflow_run.pull_requests[0].number` or, for forks where that
+# array is commonly empty, by querying the pull requests associated with
+# `workflow_run.head_sha`. That is useful low-latency defense in depth, but it
+# does NOT eliminate the stale-PASS window and is NOT a sufficient prerequisite
+# for `enforce: hard`.
+#
+# The real hard-mode prerequisite is a trusted external review-event channel,
+# such as a GitHub App/webhook that emits `repository_dispatch` and triggers a
+# workflow defined on the default branch. That replacement is roadmap/v1.1.
+# A real GitHub run must also confirm which SHA receives the resulting gate
+# check and whether it satisfies the ruleset's "Require workflows to pass" rule.
+#
 # Compensating controls (native GitHub settings, configure alongside this
 # gate, not instead of it):
 #   - Enable native "Require a pull request before merging" with review
@@ -89,32 +108,40 @@ name: Gatekeeper Selfgate
 #   - Enable "Require approval of the most recent reviewable push" (a.k.a.
 #     dismiss stale approvals on new commits) to close the push-side half
 #     of staleness.
-#   - A trusted review-event relay (e.g. a `workflow_run` bridge off a
-#     restricted-permission `pull_request_review` workflow) or the
-#     `gatekeeper-selfgate-schedule` cron re-asserting the check at the
-#     PR's current SHA are the only things that close the remaining
-#     review-dismissal gap for THIS check specifically. Until one of those
-#     is wired up and verified, treat a trusted low-latency review-event
-#     relay (or an equivalently short schedule interval) as a PRECONDITION
-#     for promoting `enforce` to `hard`, not an optional hardening step.
-#     Implementing that relay is v1.1 scope (tasks/LEDGER.md T-20260718-09
-#     debt queue), not done this round.
+#   - Keep the schedule fallback below enabled; it gives operators a bounded
+#     recovery path when the best-effort pulse is suppressed or unavailable,
+#     or when its API reverse lookup fails.
 #
-# Enforcement starts in advisory `soft` mode. Promote to `enforce: hard`
-# only after the preconditions above are satisfied and the user wires
-# `gatekeeper-selfgate` into a repository ruleset -- see tasks/LEDGER.md
-# T-20260718-09.
+# Enforcement MUST remain in advisory `soft` mode until the trusted external
+# channel exists, check-SHA/ruleset behavior is verified in the real repository,
+# and the user wires `gatekeeper-selfgate` into that ruleset -- see
+# tasks/LEDGER.md T-20260718-09.
 
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, labeled, unlabeled]
   check_suite:
     types: [completed]
+  workflow_run:
+    workflows: ["Review Ping"]
+    types: [completed]
   schedule:
     # Fallback staleness backstop -- see SECURITY NOTE 3 above and the
     # gatekeeper-selfgate-schedule job below. This mitigates, but does not
     # fully close, the review-dismissal staleness window (30-minute lag).
     - cron: "*/30 * * * *"
+  workflow_dispatch:
+    # T-20260718-10: manual trigger for the gatekeeper-selfgate-schedule
+    # job below (see that job's `if:` condition), so it can be driven with
+    # `gh workflow run` for real-runner integration testing without
+    # waiting on the cron interval. Same trust class as `schedule`: like
+    # `schedule`, GitHub Actions always loads a `workflow_dispatch` run's
+    # workflow definition from the ref it is dispatched against (the
+    # default branch here), never from PR-controlled content -- so adding
+    # it does not weaken SECURITY NOTE 1's "definition loads from a
+    # trusted ref" invariant. This trigger is NOT added to the
+    # `gatekeeper-selfgate` job's `if:` below -- that job is the PR gate
+    # itself and has no use for a manual, PR-less invocation.
 
 permissions:
   contents: read
@@ -131,10 +158,14 @@ jobs:
     # `gatekeeper doctor` to validate whatever wiring you do choose.
     name: gatekeeper-selfgate
     # `on:` above never includes `pull_request` (see the Two-file split
-    # note), so only pull_request_target/check_suite/schedule can ever
-    # trigger this file. This job excludes `schedule`, which the dedicated
+    # note), so only pull_request_target/check_suite/workflow_run/schedule/
+    # workflow_dispatch can ever trigger this file. This job excludes
+    # schedule and workflow_dispatch, which the dedicated
     # gatekeeper-selfgate-schedule job below handles instead.
-    if: github.event_name == 'pull_request_target' || github.event_name == 'check_suite'
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      github.event_name == 'check_suite' ||
+      github.event_name == 'workflow_run'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -144,12 +175,15 @@ jobs:
     concurrency:
       group: >-
         gatekeeper-selfgate-gate-${{ github.event.pull_request.number ||
-        github.event.check_suite.pull_requests[0].number || github.run_id }}
+        github.event.check_suite.pull_requests[0].number ||
+        github.event.workflow_run.pull_requests[0].number ||
+        github.event.workflow_run.head_sha || github.run_id }}
       cancel-in-progress: true
     steps:
-      # Fork-safety invariant: this pull_request_target/check_suite job
-      # must never checkout or execute PR head code. Both remaining trigger
-      # events load *this workflow file* from the base branch (see
+      # Fork-safety invariant: this pull_request_target/check_suite/
+      # workflow_run job must never checkout or execute PR head code. All
+      # three trigger events load *this workflow file* from a trusted branch
+      # (workflow_run uses the default branch; see
       # SECURITY NOTE 1 above for why pull_request_review was removed
       # instead of "fixed" here, and the Two-file split note for why
       # `pull_request` was removed from `on:` entirely rather than merely
@@ -160,6 +194,9 @@ jobs:
       - name: Resolve and verify the trusted checkout ref
         id: trusted-ref
         env:
+          # workflow_run has no pull_request.base.sha. For that event,
+          # github.sha is the default branch SHA, so FALLBACK_SHA is the
+          # trusted checkout and never workflow_run.head_sha / PR head code.
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           FALLBACK_SHA: ${{ github.sha }}
         run: |
@@ -215,19 +252,22 @@ jobs:
 
   gatekeeper-selfgate-schedule:
     name: gatekeeper-selfgate-schedule
-    # Fallback staleness backstop (see SECURITY NOTE 3 above): a review
-    # submitted, dismissed, or changed on an open PR does not by itself
-    # retrigger `gatekeeper-selfgate`. This job periodically re-runs
-    # `gatekeeper gate` for open pull requests, up to the --limit below, so
-    # their sticky-comment ledgers eventually reflect new review evidence
-    # even without a push or label toggle. It mitigates, but -- until the
-    # trusted review-event relay in SECURITY NOTE 3 exists -- does not
-    # fully close, the review-dismissal staleness window between cron
-    # ticks.
+    # Fallback staleness backstop (see SECURITY NOTE 3 above): the best-effort
+    # workflow_run relay is a low-latency review path only when the PR does not
+    # suppress it. This job periodically re-runs `gatekeeper gate` for open
+    # pull requests, up to the --limit below, so their sticky-comment ledgers
+    # still recover after suppressed/missed relay events, reverse-lookup
+    # failures, or operational outages.
     #
     # `schedule` always runs against the default branch's latest commit --
     # there is no PR-controlled ref to worry about for this trigger, unlike
-    # pull_request_target/check_suite.
+    # pull_request_target/check_suite. `workflow_dispatch` (T-20260718-10)
+    # carries the same trust class (definition always loads from the ref it
+    # is dispatched against, i.e. the default branch) -- it exists purely so
+    # this job can be driven manually, e.g. `gh workflow run
+    # gatekeeper-selfgate.yml`, for real-GitHub-Actions-runner integration
+    # testing (`gh pr list`, GITHUB_OUTPUT plumbing, etc.) without waiting
+    # on the cron interval; see tasks/LEDGER.md T-20260718-09 debt queue.
     #
     # Known limitation (tracked as a debt, not resolved this round): this
     # is its own distinct job/check ("gatekeeper-selfgate-schedule"),
@@ -238,7 +278,7 @@ jobs:
     # PRs. It is deliberately never-failing (best-effort maintenance, not
     # an enforcement point) -- per-PR errors are logged as warnings, not
     # job failures.
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: read

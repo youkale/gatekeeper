@@ -124,24 +124,30 @@ function looksLikeGateJob(jobId: string, job: Record<string, unknown>): boolean 
 	);
 }
 
+/** Parses one workflow YAML file to a record, or throws DoctorConfigError for malformed content ("config damage" -- see runDoctor's fail-direction contract). */
+async function parseWorkflowFile(file: string): Promise<Record<string, unknown> | undefined> {
+	const content = await readFile(file, "utf8");
+	const document = parseDocument(content, { prettyErrors: false, uniqueKeys: true });
+	if (document.errors.length > 0) {
+		throw new DoctorConfigError(`${file}: invalid workflow YAML: ${document.errors[0]?.message ?? "unknown error"}`);
+	}
+	let value: unknown;
+	try {
+		value = document.toJS();
+	} catch (error) {
+		throw new DoctorConfigError(
+			`${file}: invalid workflow YAML: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+	return isRecord(value) ? value : undefined;
+}
+
 export async function gateCheckNamesFromWorkflows(target: string): Promise<string[]> {
 	const names = new Set<string>();
 	const files = await workflowFiles(target);
 	for (const file of files) {
-		const content = await readFile(file, "utf8");
-		const document = parseDocument(content, { prettyErrors: false, uniqueKeys: true });
-		if (document.errors.length > 0) {
-			throw new DoctorConfigError(`${file}: invalid workflow YAML: ${document.errors[0]?.message ?? "unknown error"}`);
-		}
-		let value: unknown;
-		try {
-			value = document.toJS();
-		} catch (error) {
-			throw new DoctorConfigError(
-				`${file}: invalid workflow YAML: ${error instanceof Error ? error.message : String(error)}`,
-			);
-		}
-		if (!isRecord(value) || !isRecord(value.jobs)) {
+		const value = await parseWorkflowFile(file);
+		if (!value || !isRecord(value.jobs)) {
 			continue;
 		}
 		for (const [jobId, rawJob] of Object.entries(value.jobs)) {
@@ -152,6 +158,91 @@ export async function gateCheckNamesFromWorkflows(target: string): Promise<strin
 		}
 	}
 	return [...names].sort();
+}
+
+// T-09/LESSONS: "required check 只能由定义取自受信 ref 的 workflow
+// （pull_request_target/check_suite/workflow_run/schedule）产出" -- a
+// required-check-producing job that also listens on a trigger whose
+// workflow definition loads from PR-controlled content (pull_request,
+// pull_request_review) lets a PR forge/spoof its own required check. This
+// is the deep-reasoner-directed hard-gate precondition tracked as debt in
+// tasks/LEDGER.md (T-09).
+const UNSAFE_GATE_TRIGGERS = new Set(["pull_request", "pull_request_review"]);
+
+function workflowTriggerNames(value: Record<string, unknown>): string[] {
+	const on = value.on;
+	if (typeof on === "string") {
+		return [on];
+	}
+	if (Array.isArray(on)) {
+		return on.filter((entry): entry is string => typeof entry === "string");
+	}
+	if (isRecord(on)) {
+		return Object.keys(on);
+	}
+	return [];
+}
+
+/**
+ * Heuristic for "this step produces a Gatekeeper required check": a local
+ * (`uses: ./...`) or published (`uses: *gatekeeper*`) action step invoked
+ * with `mode: gate`. `mode` defaults to `gate` in action.yml (see its
+ * `mode.default: gate`), so a step that omits `with.mode` entirely still
+ * runs in gate mode at runtime -- only an explicit non-gate mode (e.g.
+ * `mode: check`) opts a step out of this heuristic.
+ */
+function stepProducesRequiredCheck(step: unknown): boolean {
+	if (!isRecord(step) || typeof step.uses !== "string") {
+		return false;
+	}
+	const uses = step.uses;
+	const looksLikeGateAction = uses === "./" || uses.startsWith("./") || /gatekeeper/i.test(uses);
+	if (!looksLikeGateAction) {
+		return false;
+	}
+	const withBlock = isRecord(step.with) ? step.with : undefined;
+	return (withBlock?.mode ?? "gate") === "gate";
+}
+
+function jobProducesRequiredCheck(job: Record<string, unknown>): boolean {
+	const steps = Array.isArray(job.steps) ? job.steps : [];
+	return steps.some(stepProducesRequiredCheck);
+}
+
+export interface GateWorkflowTriggerViolation {
+	file: string;
+	jobId: string;
+	triggers: string[];
+}
+
+/**
+ * Flags required-check-producing jobs that listen on a PR-content-loaded
+ * trigger (pull_request/pull_request_review) -- see UNSAFE_GATE_TRIGGERS
+ * above. Callers treat "workflow path/file could not be located" as a
+ * warning (fail-open, matching workflowFiles' own ENOENT -> generic Error
+ * contract) and a detected violation, or malformed workflow YAML, as an
+ * error (fail-closed, matching parseWorkflowFile's DoctorConfigError
+ * contract) -- see runDoctor.
+ */
+export async function gateWorkflowTriggerViolations(target: string): Promise<GateWorkflowTriggerViolation[]> {
+	const violations: GateWorkflowTriggerViolation[] = [];
+	const files = await workflowFiles(target);
+	for (const file of files) {
+		const value = await parseWorkflowFile(file);
+		if (!value) {
+			continue;
+		}
+		const unsafeTriggers = workflowTriggerNames(value).filter((trigger) => UNSAFE_GATE_TRIGGERS.has(trigger));
+		if (unsafeTriggers.length === 0 || !isRecord(value.jobs)) {
+			continue;
+		}
+		for (const [jobId, rawJob] of Object.entries(value.jobs)) {
+			if (isRecord(rawJob) && jobProducesRequiredCheck(rawJob)) {
+				violations.push({ file, jobId, triggers: unsafeTriggers });
+			}
+		}
+	}
+	return violations;
 }
 
 function warning(message: string): void {
@@ -294,6 +385,26 @@ export async function runDoctor(
 		warning(
 			`policy lane ${conflict.lane} overrides preset ${conflict.presetFile}; ${conflict.resolution} (${conflict.userFile})`,
 		);
+	}
+
+	try {
+		const workflowTarget = path.resolve(cwd, options.workflow ?? ".github/workflows");
+		const violations = await gateWorkflowTriggerViolations(workflowTarget);
+		for (const violation of violations) {
+			hasErrors = true;
+			failure(
+				`${violation.file} job ${JSON.stringify(violation.jobId)} appears to produce a required check but is ` +
+					`triggered by ${violation.triggers.join(", ")}; required check 只能由定义取自受信 ref 的 workflow` +
+					"（pull_request_target/check_suite/workflow_run/schedule/workflow_dispatch）产出，不可绑定 pull_request/pull_request_review 触发器。",
+			);
+		}
+	} catch (error) {
+		if (error instanceof DoctorConfigError) {
+			hasErrors = true;
+			failure(error.message);
+		} else {
+			warning(`无法校验 gate workflow 触发器: ${describeError(error)}`);
+		}
 	}
 
 	const env = dependencies.env ?? process.env;

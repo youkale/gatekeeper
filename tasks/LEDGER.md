@@ -17,13 +17,15 @@
 
 | T-20260718-09 | 治理硬化 | 自身注册表 + 自门禁 workflow + 台账检查器（四缺口 ③④） | sonnet-coder | 5 轮（R1 三路 FAIL→R2/R3 codex 逐层击穿→deep-reasoner 仲裁推翻 review 触发器设计→R4 双 FAIL→终案：ruleset 锁文件部署模型） | ✅ 验收提交 | records/T-20260718-09-governance-hardening.md |
 
+| T-20260718-10 | 清债 | doctor 触发器 lint + registry 错误累积 + hint 文案 + selfgate workflow_dispatch | sonnet-coder | R1: claude(opus) FAIL(1 默认 mode 枚举) + grok PASS(4nb 采 1)→处方修复+文案补齐 | ✅ 验收提交 | records/T-20260718-10-11-debt-clearing.md |
+| T-20260718-11 | 清债 | review 事件中继（workflow_run 桥接）——codex 内审自阻+裁决降级 best-effort | codex | codex 内部双审 FAIL→BLOCKED_REDESIGN→调度者裁决选项2（诚实降级）；外部 claude(opus)/grok 双审该实现 PASS | ✅ 验收提交 | records/T-20260718-10-11-debt-clearing.md |
+
 ### 遗留债队列（活动，v1.1 候选）
 
-- [T-09] doctor 增加 gate workflow 触发器 lint（required-check job 监听 pull_request/pull_request_review 即告警）——deep-reasoner 裁决建议的纵深防御，self-gate 升 hard 的前置门禁之一
-- [T-09] 受信 review 事件中继（workflow_run 桥接或定时在最新 SHA 重发官方 check 并对 block 置败）——消除 stale-pass 窗口，enforce: hard 的硬前置
-- [T-09] schedule 兜底 job 真实 GitHub runner 联调（gh pr list 循环、GITHUB_OUTPUT 路径未经真实环境验证）
+- [v1.1] enforce: hard 的真实前置：受信外部通道（GitHub App/webhook → repository_dispatch 触发默认分支 workflow）——workflow_run 桥接已实现但可被 PR 压制脉冲，仅 best-effort（T-11 裁决结论）
+- [T-09] schedule/workflow_dispatch 兜底 job 真实 runner 联调（现可 gh workflow run 手动触发验证）
 
-- [T-07] pi-extension npm 自包含发布（tarball 打包 ../src）；真实 pi 运行时联调（pi -e / pi install 路径）
+- [T-07] pi-extension npm 自包含发布（tarball 打包 ../src）——真实 pi 运行时联调已完成 ✅（pi -e 端到端判定正确，2026-07-18）
 - [T-01] registry alias 错误 throw 丢弃已累积 issue，按需累积化（诊断完整性，非判定缺陷）
 - [T-01] billion-laughs 场景 hint 文案复用 anchor 措辞（低优）
 - [产品 v2 候选，源自减法清单] consumer verify 命令跨 repo 执行编排；台账 CI 写入（ledger 分支 one-file-per-event）；finding 级聚合；GitLab CI 平台支持（Syncify 生态实际用 GitLab——真实验收发现的需求信号）

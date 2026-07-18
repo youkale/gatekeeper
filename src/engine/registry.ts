@@ -139,15 +139,23 @@ function parseYaml(file: RegistryFile, errors: RegistryIssue[]): ParsedDocument 
 	try {
 		value = document.toJS();
 	} catch (error) {
-		throw new RegistryParseError([
-			{
-				file: file.path,
-				path: "$",
-				expected: "valid alias reference",
-				actual: error instanceof Error ? error.message : String(error),
-				hint: "Define the referenced YAML anchor before using its alias.",
-			},
-		]);
+		const message = error instanceof Error ? error.message : String(error);
+		// "Excessive alias count" is the yaml library's billion-laughs guard
+		// (resource-exhaustion protection on runaway alias expansion), which is
+		// a distinct failure mode from a plain unresolved-anchor reference and
+		// deserves its own hint rather than reusing the anchor-definition hint
+		// below.
+		const isExcessiveAliasExpansion = /excessive alias count/i.test(message);
+		errors.push({
+			file: file.path,
+			path: "$",
+			expected: "valid alias reference",
+			actual: message,
+			hint: isExcessiveAliasExpansion
+				? "YAML alias expansion exceeded safe limits; check for recursive or excessively nested aliases."
+				: "Define the referenced YAML anchor before using its alias.",
+		});
+		return undefined;
 	}
 
 	return { file: file.path, value };

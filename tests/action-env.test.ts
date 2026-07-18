@@ -127,6 +127,7 @@ describe("Action pull request event resolution", () => {
 		["pull_request_target", { number: 12, pull_request: { number: 12 } }, 12],
 		["pull_request_review", { review: {}, pull_request: { number: 13 } }, 13],
 		["check_suite", { check_suite: { pull_requests: [{ number: 14 }] } }, 14],
+		["workflow_run", { workflow_run: { pull_requests: [{ number: 15 }] } }, 15],
 	] as const)("resolves %s payloads", (eventName, payload, expected) => {
 		expect(resolvePullRequestNumber(payload, eventName)).toBe(expected);
 	});
@@ -187,6 +188,86 @@ describe("Action fail-open/fail-closed boundary", () => {
 
 		expect(exitCode).toBe(0);
 		expect(runGate).not.toHaveBeenCalled();
+	});
+
+	it("runs a workflow_run gate for the pull request embedded in the event payload", async () => {
+		vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+		const runGate = vi.fn(async () => {
+			process.stdout.write(`${JSON.stringify(gateReport("block"))}\n`);
+			return 1;
+		});
+
+		const exitCode = await runAction({
+			env: eventEnvironment({ GITHUB_EVENT_NAME: "workflow_run", INPUT_ENFORCE: "soft" }),
+			readFile: eventReader({
+				workflow_run: { pull_requests: [{ number: 52 }], head_sha: "review-ping-head" },
+			}),
+			runGate,
+		});
+
+		expect(exitCode).toBe(0);
+		expect(runGate).toHaveBeenCalledWith(
+			expect.objectContaining({ pr: 52, repo: "acme/app" }),
+			expect.any(String),
+			expect.any(Object),
+		);
+	});
+
+	it("looks up a fork workflow_run pull request by head SHA when pull_requests is empty", async () => {
+		vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+		const findPullRequestsByHeadSha = vi.fn(async () => [
+			{
+				number: 53,
+				body: null,
+				user: { login: "fork-author" },
+				head: { ref: "feature", sha: "fork-head-sha" },
+				base: { ref: "main", sha: "base-sha" },
+				labels: [],
+			},
+		]);
+		const createProvider: NonNullable<ActionDependencies["createProvider"]> = () =>
+			({ findPullRequestsByHeadSha }) as unknown as ReturnType<NonNullable<ActionDependencies["createProvider"]>>;
+		const runGate = vi.fn(async () => {
+			process.stdout.write(`${JSON.stringify(gateReport("block"))}\n`);
+			return 1;
+		});
+
+		const exitCode = await runAction({
+			env: eventEnvironment({ GITHUB_EVENT_NAME: "workflow_run", INPUT_ENFORCE: "soft" }),
+			readFile: eventReader({ workflow_run: { pull_requests: [], head_sha: "fork-head-sha" } }),
+			createProvider,
+			runGate,
+		});
+
+		expect(exitCode).toBe(0);
+		expect(findPullRequestsByHeadSha).toHaveBeenCalledWith("fork-head-sha");
+		expect(runGate).toHaveBeenCalledWith(
+			expect.objectContaining({ pr: 53, repo: "acme/app" }),
+			expect.any(String),
+			expect.any(Object),
+		);
+	});
+
+	it("skips a workflow_run when neither the payload nor head-SHA lookup identifies a pull request", async () => {
+		const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+		const findPullRequestsByHeadSha = vi.fn(async () => []);
+		const createProvider: NonNullable<ActionDependencies["createProvider"]> = () =>
+			({ findPullRequestsByHeadSha }) as unknown as ReturnType<NonNullable<ActionDependencies["createProvider"]>>;
+		const runGate = vi.fn(async () => 1);
+
+		const exitCode = await runAction({
+			env: eventEnvironment({ GITHUB_EVENT_NAME: "workflow_run" }),
+			readFile: eventReader({ workflow_run: { pull_requests: [], head_sha: "orphan-head-sha" } }),
+			createProvider,
+			runGate,
+		});
+
+		expect(exitCode).toBe(0);
+		expect(findPullRequestsByHeadSha).toHaveBeenCalledWith("orphan-head-sha");
+		expect(runGate).not.toHaveBeenCalled();
+		expect(stdout.mock.calls.map(([message]) => String(message)).join("\n")).toContain(
+			"Gatekeeper skipped: workflow run has no associated pull request",
+		);
 	});
 
 	it("turns an unexpected command exception into a warning and exit zero", async () => {

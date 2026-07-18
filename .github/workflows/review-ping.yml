@@ -1,0 +1,23 @@
+name: Review Ping
+
+# The checked-in version of this workflow requests no permissions and only
+# emits an event pulse. However, pull_request_review loads workflow content
+# from the PR merge commit, so a PR can rewrite or delete this file, change its
+# permissions/name/steps, or prevent the run from completing. This relay is
+# therefore best-effort defense in depth, not a trusted or mandatory signal.
+# When a matching Review Ping run does complete, Gatekeeper Selfgate's trusted
+# default-branch workflow_run ignores its content and conclusion and recomputes
+# the gate. The relay can be suppressed and is not a prerequisite for hard mode.
+on:
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions: {}
+
+jobs:
+  review-ping:
+    name: review-ping
+    runs-on: ubuntu-latest
+    steps:
+      - name: Emit the review event pulse
+        run: echo "review event pulse"

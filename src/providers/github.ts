@@ -541,6 +541,15 @@ export class GitHubProvider {
 		);
 	}
 
+	async findPullRequestsByHeadSha(headSha: string): Promise<GitHubPullRequest[]> {
+		const validatedHeadSha = this.component(headSha, "head SHA");
+		return this.paginateArray<GitHubPullRequest>(
+			`/commits/${encodeURIComponent(validatedHeadSha)}/pulls`,
+			`find pull requests associated with commit ${validatedHeadSha}`,
+			validatePullRequest,
+		);
+	}
+
 	async getIssue(issueNumber: number): Promise<GitHubIssue> {
 		return this.requestObject<GitHubIssue>(
 			`/issues/${this.integer(issueNumber, "issue")}`,

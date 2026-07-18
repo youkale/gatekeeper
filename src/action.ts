@@ -11,12 +11,22 @@ import {
 	runGate,
 } from "./commands/gate.js";
 import type { Verdict } from "./engine/types.js";
-import { type GitHubIssueComment, GitHubProvider, type GitHubProviderOptions, InfraError } from "./providers/github.js";
+import {
+	type GitHubIssueComment,
+	GitHubProvider,
+	type GitHubProviderOptions,
+	type GitHubPullRequest,
+	InfraError,
+} from "./providers/github.js";
 import { COMMENT_MARKER, planCommentUpsert, renderComment, renderInactiveComment } from "./render/comment.js";
 
 type ActionMode = "check" | "gate";
 type ActionEnforcement = "hard" | "soft";
-type ActionProviderFactory = NonNullable<GateDependencies["createProvider"]>;
+type GateProviderFactory = NonNullable<GateDependencies["createProvider"]>;
+type ActionProvider = ReturnType<GateProviderFactory> & {
+	findPullRequestsByHeadSha?: (headSha: string) => Promise<GitHubPullRequest[]>;
+};
+type ActionProviderFactory = (options: GitHubProviderOptions) => ActionProvider;
 
 interface ActionInputs {
 	mode: ActionMode;
@@ -79,6 +89,14 @@ export function resolvePullRequestNumber(payload: unknown, eventName?: string): 
 	if (!isRecord(payload)) {
 		return null;
 	}
+	if (eventName === "workflow_run" || (eventName === undefined && isRecord(payload.workflow_run))) {
+		const workflowRun = payload.workflow_run;
+		if (!isRecord(workflowRun) || !Array.isArray(workflowRun.pull_requests)) {
+			return null;
+		}
+		const first = workflowRun.pull_requests[0];
+		return isRecord(first) ? positiveInteger(first.number) : null;
+	}
 	if (eventName === "check_suite" || (eventName === undefined && isRecord(payload.check_suite))) {
 		const suite = payload.check_suite;
 		if (!isRecord(suite) || !Array.isArray(suite.pull_requests)) {
@@ -102,6 +120,14 @@ export function resolvePullRequestNumber(payload: unknown, eventName?: string): 
 		return positiveInteger(payload.pull_request.number);
 	}
 	return positiveInteger(payload.number);
+}
+
+function resolveWorkflowRunHeadSha(payload: unknown): string | null {
+	if (!isRecord(payload) || !isRecord(payload.workflow_run)) {
+		return null;
+	}
+	const headSha = payload.workflow_run.head_sha;
+	return typeof headSha === "string" && headSha.length > 0 ? headSha : null;
 }
 
 function resolveBaseSha(payload: unknown): string | undefined {
@@ -251,6 +277,31 @@ function providerFactory(inputs: ActionInputs, dependencies: ActionDependencies)
 		dependencies.createProvider ??
 		((options: GitHubProviderOptions) => new GitHubProvider({ ...options, token: inputs.githubToken }))
 	);
+}
+
+async function resolveWorkflowRunPullRequest(
+	event: ActionEvent,
+	inputs: ActionInputs,
+	env: NodeJS.ProcessEnv,
+	dependencies: ActionDependencies,
+): Promise<number | null> {
+	if (event.pullRequest !== null) {
+		return event.pullRequest;
+	}
+	const headSha = resolveWorkflowRunHeadSha(event.payload);
+	if (headSha === null) {
+		return null;
+	}
+	const repo = env.GITHUB_REPOSITORY;
+	if (!repo) {
+		throw new ActionInfrastructureError("GITHUB_REPOSITORY is not set");
+	}
+	const provider = providerFactory(inputs, dependencies)({ repo, token: inputs.githubToken });
+	if (!provider.findPullRequestsByHeadSha) {
+		throw new ActionInfrastructureError("the GitHub provider cannot look up pull requests by workflow_run head SHA");
+	}
+	const pullRequests = await provider.findPullRequestsByHeadSha(headSha);
+	return pullRequests[0]?.number ?? null;
 }
 
 function syntheticComment(id: number, body: string): GitHubIssueComment {
@@ -532,15 +583,22 @@ export async function runAction(dependencies: ActionDependencies = {}): Promise<
 	let pullRequest: number | null = null;
 	try {
 		inputs = readInputs(env);
-		const event = await readActionEvent(env, dependencies);
+		let event = await readActionEvent(env, dependencies);
+		if (env.GITHUB_EVENT_NAME === "workflow_run" && event.pullRequest === null) {
+			event = { ...event, pullRequest: await resolveWorkflowRunPullRequest(event, inputs, env, dependencies) };
+		}
 		pullRequest = event.pullRequest;
-		if (env.GITHUB_EVENT_NAME === "check_suite" && event.pullRequest === null) {
+		if (
+			(env.GITHUB_EVENT_NAME === "check_suite" || env.GITHUB_EVENT_NAME === "workflow_run") &&
+			event.pullRequest === null
+		) {
+			const eventLabel = env.GITHUB_EVENT_NAME === "check_suite" ? "check suite" : "workflow run";
 			await appendActionSummary(
 				env,
-				actionSummary(inputs, null, "SKIPPED (check suite has no associated pull request)"),
+				actionSummary(inputs, null, `SKIPPED (${eventLabel} has no associated pull request)`),
 				dependencies,
 			);
-			process.stdout.write("Gatekeeper skipped: check suite has no associated pull request\n");
+			process.stdout.write(`Gatekeeper skipped: ${eventLabel} has no associated pull request\n`);
 			return 0;
 		}
 

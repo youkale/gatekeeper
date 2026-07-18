@@ -39,6 +39,52 @@ describe("registry schema diagnostics", () => {
 		]);
 	});
 
+	it("reports excessive alias expansion (billion laughs) with a distinct hint from an unresolved alias", () => {
+		const billionLaughs = `
+a: &a [1,2,3,4,5,6,7,8,9,10]
+b: &b [*a,*a,*a,*a,*a,*a,*a,*a,*a,*a]
+c: &c [*b,*b,*b,*b,*b,*b,*b,*b,*b,*b]
+d: &d [*c,*c,*c,*c,*c,*c,*c,*c,*c,*c]
+e: &e [*d,*d,*d,*d,*d,*d,*d,*d,*d,*d]
+`;
+		const issues = capturedIssues([{ path: "policy.yaml", content: billionLaughs }]);
+
+		expect(issues).toEqual([
+			{
+				file: "policy.yaml",
+				path: "$",
+				expected: "valid alias reference",
+				actual: "Excessive alias count indicates a resource exhaustion attack",
+				hint: "YAML alias expansion exceeded safe limits; check for recursive or excessively nested aliases.",
+			},
+		]);
+	});
+
+	it("accumulates issues across files instead of discarding earlier ones when a later file hits an alias-materialization error (T-01 debt)", () => {
+		const issues = capturedIssues([
+			{
+				path: "policy.yaml",
+				content: `
+apiVersion: gatekeeper/v1
+lanes:
+  human: { type: human-approval, min: 1, fersh: true }
+levels:
+  strict: { enforcement: block, require: { m: 1, lanes: [human] } }
+`,
+			},
+			{ path: "contracts/broken-alias.yaml", content: "name: *missing" },
+		]);
+
+		const files = new Set(issues.map((issue) => issue.file));
+		expect(files).toEqual(new Set(["policy.yaml", "contracts/broken-alias.yaml"]));
+		expect(issues).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ file: "policy.yaml", path: "$.lanes.human.fersh" }),
+				expect.objectContaining({ file: "contracts/broken-alias.yaml", expected: "valid alias reference" }),
+			]),
+		);
+	});
+
 	it("snapshots file, YAML path, expected/actual, and typo hint", () => {
 		const issues = capturedIssues([
 			{ path: "policy.yaml", content: validPolicy },

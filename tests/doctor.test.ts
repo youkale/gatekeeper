@@ -79,6 +79,220 @@ jobs:
 		expect(output).toContain("Unresolved alias");
 	});
 
+	it("reports an error when a required-check-producing job listens on pull_request (a PR could forge/spoof the required check)", async () => {
+		const workflowDir = await mkdtemp(path.join(tmpdir(), "gatekeeper-doctor-trigger-lint-"));
+		try {
+			await writeFile(
+				path.join(workflowDir, "bad-gate.yml"),
+				`name: bad-gate
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+jobs:
+  gate:
+    name: gatekeeper-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: acme/gatekeeper@v1
+        with:
+          mode: gate
+`,
+				"utf8",
+			);
+			const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+			vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+			const exitCode = await runDoctor(
+				{ registry: registryDirectory, repo: "acme/app", workflow: workflowDir },
+				registryDirectory,
+				{
+					createProvider: () => ({
+						getBranchProtectionRequiredChecks: async () => ({
+							available: true,
+							contexts: ["gatekeeper-gate"],
+							checks: [],
+						}),
+					}),
+				},
+			);
+
+			expect(exitCode).toBe(1);
+			const output = stderr.mock.calls.map(([message]) => String(message)).join("\n");
+			expect(output).toContain("bad-gate.yml");
+			expect(output).toContain("pull_request");
+			expect(output).toContain("受信 ref");
+		} finally {
+			await rm(workflowDir, { recursive: true, force: true });
+		}
+	});
+
+	it("reports an error when a required-check-producing job omits `with.mode` (mode defaults to gate in action.yml, so the step still runs as a gate)", async () => {
+		const workflowDir = await mkdtemp(path.join(tmpdir(), "gatekeeper-doctor-trigger-lint-default-mode-"));
+		try {
+			await writeFile(
+				path.join(workflowDir, "bad-gate-default-mode.yml"),
+				`name: bad-gate-default-mode
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+jobs:
+  gate:
+    name: gatekeeper-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./
+`,
+				"utf8",
+			);
+			const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+			vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+			const exitCode = await runDoctor(
+				{ registry: registryDirectory, repo: "acme/app", workflow: workflowDir },
+				registryDirectory,
+				{
+					createProvider: () => ({
+						getBranchProtectionRequiredChecks: async () => ({
+							available: true,
+							contexts: ["gatekeeper-gate"],
+							checks: [],
+						}),
+					}),
+				},
+			);
+
+			expect(exitCode).toBe(1);
+			const output = stderr.mock.calls.map(([message]) => String(message)).join("\n");
+			expect(output).toContain("bad-gate-default-mode.yml");
+			expect(output).toContain("pull_request");
+			expect(output).toContain("受信 ref");
+		} finally {
+			await rm(workflowDir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not flag a step with an explicit non-gate mode (mode: check) even when it listens on pull_request", async () => {
+		const workflowDir = await mkdtemp(path.join(tmpdir(), "gatekeeper-doctor-trigger-lint-check-mode-"));
+		try {
+			await writeFile(
+				path.join(workflowDir, "advisory-check.yml"),
+				`name: advisory-check
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+jobs:
+  check:
+    name: gatekeeper-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./
+        with:
+          mode: check
+`,
+				"utf8",
+			);
+			const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+			vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+			const exitCode = await runDoctor(
+				{ registry: registryDirectory, repo: "acme/app", workflow: workflowDir, checkName: ["gatekeeper-check"] },
+				registryDirectory,
+				{
+					createProvider: () => ({
+						getBranchProtectionRequiredChecks: async () => ({
+							available: true,
+							contexts: ["gatekeeper-check"],
+							checks: [],
+						}),
+					}),
+				},
+			);
+
+			expect(exitCode).toBe(0);
+			const output = stderr.mock.calls.map(([message]) => String(message)).join("\n");
+			expect(output).not.toContain("受信 ref");
+		} finally {
+			await rm(workflowDir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not flag the selfgate shape (pull_request_target/check_suite/schedule + local action) as a trigger violation", async () => {
+		const workflowDir = await mkdtemp(path.join(tmpdir(), "gatekeeper-doctor-trigger-lint-ok-"));
+		try {
+			await writeFile(
+				path.join(workflowDir, "selfgate.yml"),
+				`name: selfgate
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  check_suite:
+    types: [completed]
+  schedule:
+    - cron: "*/30 * * * *"
+jobs:
+  gatekeeper-selfgate:
+    name: gatekeeper-selfgate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./
+        with:
+          mode: gate
+`,
+				"utf8",
+			);
+			const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+			vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+			const exitCode = await runDoctor(
+				{ registry: registryDirectory, repo: "acme/app", workflow: workflowDir },
+				registryDirectory,
+				{
+					createProvider: () => ({
+						getBranchProtectionRequiredChecks: async () => ({
+							available: true,
+							contexts: ["gatekeeper-selfgate"],
+							checks: [],
+						}),
+					}),
+				},
+			);
+
+			expect(exitCode).toBe(0);
+			const output = stderr.mock.calls.map(([message]) => String(message)).join("\n");
+			expect(output).not.toContain("受信 ref");
+		} finally {
+			await rm(workflowDir, { recursive: true, force: true });
+		}
+	});
+
+	it("degrades the gate workflow trigger check to a warning (not an error) when it cannot locate the workflow path", async () => {
+		const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+		vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+		const exitCode = await runDoctor(
+			{
+				registry: registryDirectory,
+				repo: "acme/app",
+				checkName: ["gatekeeper"],
+				workflow: path.join(registryDirectory, "does-not-exist-workflows"),
+			},
+			registryDirectory,
+			{
+				createProvider: () => ({
+					getBranchProtectionRequiredChecks: async () => ({
+						available: true,
+						contexts: ["gatekeeper"],
+						checks: [],
+					}),
+				}),
+			},
+		);
+
+		expect(exitCode).toBe(0);
+		const output = stderr.mock.calls.map(([message]) => String(message)).join("\n");
+		expect(output).toContain("无法校验 gate workflow 触发器");
+	});
+
 	it("warns and exits zero when branch protection is unavailable", async () => {
 		const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
 		vi.spyOn(process.stdout, "write").mockImplementation(() => true);
