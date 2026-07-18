@@ -1,0 +1,43 @@
+{
+	"name": "pi-gatekeeper",
+	"version": "0.1.0",
+	"description": "Pi coding-agent extension for Gatekeeper: local contract check tool, init/triage commands, and pi-subagents role pack.",
+	"license": "Apache-2.0",
+	"type": "module",
+	"keywords": [
+		"pi-package",
+		"gatekeeper",
+		"contracts",
+		"merge-gate"
+	],
+	"main": "index.ts",
+	"exports": {
+		".": "./index.ts"
+	},
+	"files": [
+		"index.ts",
+		"agents",
+		"README.md"
+	],
+	"pi": {
+		"extensions": [
+			"./index.ts"
+		]
+	},
+	"engines": {
+		"node": ">=20"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-coding-agent": "^0.80.10",
+		"@types/node": "^20.19.43",
+		"typescript": "^5.9.3"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*"
+	},
+	"peerDependenciesMeta": {
+		"@earendil-works/pi-coding-agent": {
+			"optional": true
+		}
+	}
+}
