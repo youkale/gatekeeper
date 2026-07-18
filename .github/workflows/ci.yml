@@ -43,6 +43,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # pi-extension is a separate package; its type-only devDependency
+      # (@earendil-works/pi-coding-agent) lives in its own package.json and is
+      # required by the root typecheck (tests import pi-extension/index.ts).
+      - name: Install pi-extension dependencies
+        run: npm ci --prefix pi-extension
+
       - name: Typecheck
         run: npm run typecheck
 
