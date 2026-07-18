@@ -1,0 +1,292 @@
+name: Gatekeeper Selfgate
+
+# Dogfooding (T-20260718-09): this repository gates its own pull requests
+# with its own governance/registry contracts (CLAUDE.md invariant #3 made
+# machine-checkable). This file hosts the privileged, potentially
+# branch-protection-required jobs:
+#
+#   `gatekeeper-selfgate`     The actual gate, mirroring the security shape
+#                             of examples/workflows/gatekeeper-gate.yml: it
+#                             runs on `pull_request_target` (+ check_suite)
+#                             so it can carry a write-capable token, and it
+#                             therefore MUST NEVER build or execute PR head
+#                             code. It only checks out this repo's trusted
+#                             base tree, builds the action from that trusted
+#                             tree, and runs it in `mode: gate`, which reads
+#                             the PR's changed files and review evidence
+#                             through the GitHub API instead of a local
+#                             diff. A pull request can therefore never edit
+#                             governance/registry (or the action's own
+#                             source) to weaken its own gate.
+#
+#   `gatekeeper-selfgate-     Best-effort staleness backstop on a `schedule`
+#     schedule`               cron (see the job below for why one is
+#                             needed and what it does and does not cover).
+#
+# The ordinary typecheck/test/biome/check:governance CI job lives in the
+# separate .github/workflows/ci.yml file instead of here -- see the
+# "Two-file split" note below for why that separation is load-bearing, not
+# cosmetic.
+#
+# SECURITY NOTE 1 -- why `pull_request_review` is not, and never may be, a
+# trigger here: for `pull_request_review` (and other review-comment-shaped
+# PR events), GitHub Actions loads the *workflow YAML itself* from the pull
+# request's merge commit, not from the base branch -- unlike
+# `pull_request_target`, which is defined by, and always loads from, the
+# base branch. This is documented GitHub Actions behavior, not a config
+# mistake. A PR could therefore rewrite this very file (e.g. delete the
+# trusted-ref assertion step, or add a step that exfiltrates secrets), and
+# that PR-rewritten version -- not this base-branch version -- is what
+# would execute under `pull_request_review`. No step added *inside* a job
+# can remediate this, because the compromise happens before any step runs,
+# at workflow-selection time.
+#
+# Two-file split (why `ci` moved to .github/workflows/ci.yml): the same
+# workflow-selection-time risk applies to *any* trigger whose definition
+# loads from PR content, even if the privileged job's own `if:` condition
+# excludes that trigger -- because the `if:` expression itself is part of
+# the file content that trigger's event would load. Concretely: if this
+# file's `on:` still listed `pull_request`, a same-repository (non-fork)
+# branch could open a PR carrying a modified copy of this file where the
+# `gatekeeper-selfgate` job's `if:` was rewritten to also match
+# `pull_request` -- and for a same-repo `pull_request` event (unlike a fork
+# PR's automatically-downgraded token), GITHUB_TOKEN keeps the full
+# `permissions:` requested below. This file's `on:` therefore never lists
+# any PR-content-loaded event at all: only `pull_request_target`
+# (workflow definition loads from the base branch by design),
+# `check_suite` (no PR-authored workflow content involved), and `schedule`
+# (always the default branch's latest commit).
+#
+# SECURITY NOTE 2 -- required-check deployment: do NOT wire this up with a
+# classic branch-protection "required status check" matched by name (e.g.
+# picking "gatekeeper-selfgate" from the check-name list). GitHub matches
+# required status checks by NAME ONLY, regardless of which workflow
+# produced them -- any PR can add its own `pull_request`-triggered workflow
+# with a job literally named `gatekeeper-selfgate` that always passes, and
+# a name-matched required check cannot tell that forged green check apart
+# from this one. Use a repository ruleset's "Require workflows to pass"
+# rule instead, pinned to this exact file
+# (`.github/workflows/gatekeeper-selfgate.yml`) on the default branch --
+# that binds enforcement to the workflow FILE's identity, not a spoofable
+# name string. See README.md's "Required check setup" section.
+#
+# SECURITY NOTE 3 -- staleness is a real stale-PASS window, not just a
+# delay: removing `pull_request_review` means a review dismissal or a new
+# CHANGES_REQUESTED review on an already-gated SHA does not by itself
+# retrigger `gatekeeper-selfgate`. If the gate already went green at that
+# SHA, it STAYS green (GitHub does not retroactively fail an already-
+# passed check) until something recomputes it -- a push, a label toggle, a
+# check-suite completion, or the `gatekeeper-selfgate-schedule` cron below.
+# A merge attempted inside that window would see a real, but stale, green
+# check. This is NOT merely "delays showing a new pass" -- it is a genuine
+# window where withdrawn/downgraded review evidence is not yet reflected.
+# Compensating controls (native GitHub settings, configure alongside this
+# gate, not instead of it):
+#   - Enable native "Require a pull request before merging" with review
+#     requirements of your own -- GitHub's own review-requirement
+#     enforcement recomputes live on every merge attempt and is not subject
+#     to this check-staleness problem.
+#   - Enable "Require approval of the most recent reviewable push" (a.k.a.
+#     dismiss stale approvals on new commits) to close the push-side half
+#     of staleness.
+#   - A trusted review-event relay (e.g. a `workflow_run` bridge off a
+#     restricted-permission `pull_request_review` workflow) or the
+#     `gatekeeper-selfgate-schedule` cron re-asserting the check at the
+#     PR's current SHA are the only things that close the remaining
+#     review-dismissal gap for THIS check specifically. Until one of those
+#     is wired up and verified, treat a trusted low-latency review-event
+#     relay (or an equivalently short schedule interval) as a PRECONDITION
+#     for promoting `enforce` to `hard`, not an optional hardening step.
+#     Implementing that relay is v1.1 scope (tasks/LEDGER.md T-20260718-09
+#     debt queue), not done this round.
+#
+# Enforcement starts in advisory `soft` mode. Promote to `enforce: hard`
+# only after the preconditions above are satisfied and the user wires
+# `gatekeeper-selfgate` into a repository ruleset -- see tasks/LEDGER.md
+# T-20260718-09.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  check_suite:
+    types: [completed]
+  schedule:
+    # Fallback staleness backstop -- see SECURITY NOTE 3 above and the
+    # gatekeeper-selfgate-schedule job below. This mitigates, but does not
+    # fully close, the review-dismissal staleness window (30-minute lag).
+    - cron: "*/30 * * * *"
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: read
+  statuses: read
+
+jobs:
+  gatekeeper-selfgate:
+    # This job/check name is only meaningful once wired into a repository
+    # ruleset's "Require workflows to pass" rule pinned to this exact
+    # file -- see SECURITY NOTE 2 above. Do NOT configure it as a
+    # name-matched classic branch-protection required status check. Run
+    # `gatekeeper doctor` to validate whatever wiring you do choose.
+    name: gatekeeper-selfgate
+    # `on:` above never includes `pull_request` (see the Two-file split
+    # note), so only pull_request_target/check_suite/schedule can ever
+    # trigger this file. This job excludes `schedule`, which the dedicated
+    # gatekeeper-selfgate-schedule job below handles instead.
+    if: github.event_name == 'pull_request_target' || github.event_name == 'check_suite'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      checks: read
+      statuses: read
+    concurrency:
+      group: >-
+        gatekeeper-selfgate-gate-${{ github.event.pull_request.number ||
+        github.event.check_suite.pull_requests[0].number || github.run_id }}
+      cancel-in-progress: true
+    steps:
+      # Fork-safety invariant: this pull_request_target/check_suite job
+      # must never checkout or execute PR head code. Both remaining trigger
+      # events load *this workflow file* from the base branch (see
+      # SECURITY NOTE 1 above for why pull_request_review was removed
+      # instead of "fixed" here, and the Two-file split note for why
+      # `pull_request` was removed from `on:` entirely rather than merely
+      # excluded via `if:`), so an implicit checkout would already be safe
+      # -- the explicit resolve-and-assert step below is kept anyway as
+      # defense in depth against a future trigger being added carelessly to
+      # the `on:` block above.
+      - name: Resolve and verify the trusted checkout ref
+        id: trusted-ref
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          FALLBACK_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          REF="${BASE_SHA:-$FALLBACK_SHA}"
+          if [ -z "$REF" ]; then
+            echo "::error::could not resolve a trusted checkout ref (no pull_request.base.sha and no github.sha)"
+            exit 1
+          fi
+          case "$REF" in
+            refs/pull/*)
+              echo "::error::resolved checkout ref '$REF' looks like a PR ref (refs/pull/*); refusing to check it out"
+              exit 1
+              ;;
+          esac
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+
+      # Checked out at the SHA resolved (and asserted trusted) above --
+      # never an implicit/default ref.
+      - name: Checkout the trusted base tree (registry + action source)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.trusted-ref.outputs.ref }}
+          persist-credentials: false
+
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm ci
+
+      # dist/ is gitignored -- action.yml's `main: dist/action.js` only
+      # exists after this build step. Built entirely from the trusted base
+      # tree checked out above, never from PR head content. `uses: ./` below
+      # resolves the action against this same checkout + freshly built
+      # dist/.
+      - name: Build the action bundle
+        run: npm run build
+
+      # `gatekeeper:override` is the default override label. The labeled and
+      # unlabeled triggers above immediately recompute the gate when it
+      # changes. `mode: gate` fetches the PR's changed files and review
+      # evidence over the GitHub API -- it never checks out the PR head.
+      - name: Run Gatekeeper against its own registry (advisory)
+        uses: ./
+        with:
+          mode: gate
+          registry-path: governance/registry
+          enforce: soft
+          github-token: ${{ github.token }}
+
+  gatekeeper-selfgate-schedule:
+    name: gatekeeper-selfgate-schedule
+    # Fallback staleness backstop (see SECURITY NOTE 3 above): a review
+    # submitted, dismissed, or changed on an open PR does not by itself
+    # retrigger `gatekeeper-selfgate`. This job periodically re-runs
+    # `gatekeeper gate` for open pull requests, up to the --limit below, so
+    # their sticky-comment ledgers eventually reflect new review evidence
+    # even without a push or label toggle. It mitigates, but -- until the
+    # trusted review-event relay in SECURITY NOTE 3 exists -- does not
+    # fully close, the review-dismissal staleness window between cron
+    # ticks.
+    #
+    # `schedule` always runs against the default branch's latest commit --
+    # there is no PR-controlled ref to worry about for this trigger, unlike
+    # pull_request_target/check_suite.
+    #
+    # Known limitation (tracked as a debt, not resolved this round): this
+    # is its own distinct job/check ("gatekeeper-selfgate-schedule"),
+    # separate from the "gatekeeper-selfgate" job/check that a repository
+    # ruleset would require. It refreshes the advisory sticky comment on
+    # each open PR (subject to the --limit cap below); it does not by
+    # itself re-satisfy a required "gatekeeper-selfgate" check for those
+    # PRs. It is deliberately never-failing (best-effort maintenance, not
+    # an enforcement point) -- per-PR errors are logged as warnings, not
+    # job failures.
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      checks: read
+      statuses: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build the CLI bundle
+        run: npm run build
+
+      - name: Re-run the gate for open pull requests, up to 500 (best-effort, never fails the job)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          # --limit is a bounded-pagination safety cap, matching this
+          # repo's own convention of never letting a GitHub API listing run
+          # unbounded (see MAX_PAGINATION_PAGES/MAX_PAGINATED_ITEMS in
+          # src/providers/github.ts and MAX_PAGES in src/commands/stats.ts,
+          # which apply the same principle to their own listings). A
+          # repository with more than 500 simultaneously open PRs needs a
+          # different refresh strategy than one flat `gh pr list` call.
+          numbers="$(gh pr list --state open --json number --jq '.[].number' --limit 500)"
+          if [ -z "$numbers" ]; then
+            echo "no open pull requests; nothing to refresh"
+            exit 0
+          fi
+          for n in $numbers; do
+            echo "::group::gatekeeper gate --pr $n"
+            node dist/cli.js gate --pr "$n" --registry governance/registry --repo "$GITHUB_REPOSITORY" --json
+            code=$?
+            if [ "$code" -gt 1 ]; then
+              echo "::warning::gatekeeper gate --pr $n exited $code (infrastructure/usage error, not a block verdict)"
+            fi
+            echo "::endgroup::"
+          done
+          exit 0

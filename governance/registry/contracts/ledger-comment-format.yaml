@@ -1,0 +1,27 @@
+apiVersion: gatekeeper/v1
+name: ledger-comment-format
+description: >-
+  CLAUDE.md invariant #3: the sticky-comment ledger block format (the
+  `gatekeeper-ledger` / `gatekeeper-triage-ledger` fenced JSON payloads and
+  the `<!-- gatekeeper:verdict -->` / `<!-- gatekeeper:triage -->` marker
+  comments rendered by src/render/comment.ts and src/render/triage.ts).
+  `gatekeeper stats` parses this exact shape from historical PR comments, and
+  the test suite asserts it field-by-field; a silent format change breaks
+  external ledger aggregation.
+level: breaking-review-required
+authority:
+  repo: youkale/gatekeeper
+  paths:
+    - src/render/comment.ts
+    - src/render/triage.ts
+consumers:
+  - repo: youkale/gatekeeper
+    paths:
+      - src/commands/stats.ts
+    role: consumer
+  - repo: youkale/gatekeeper
+    paths:
+      - tests/comment.test.ts
+      - tests/triage.test.ts
+    role: consumer
+    verify: npm test

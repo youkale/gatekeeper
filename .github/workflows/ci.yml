@@ -1,0 +1,56 @@
+name: CI
+
+# Advisory typecheck/test/biome/check:governance CI. Deliberately kept in
+# its own file, split out of .github/workflows/gatekeeper-selfgate.yml
+# (T-20260718-09): that file hosts a privileged job that is or could become
+# a branch-protection required check, and therefore must never carry ANY
+# trigger whose workflow definition loads from PR-controlled content --
+# not even behind a job-level `if:` guard, since the `if:` expression
+# itself would then live inside content the PR controls for that trigger.
+# See gatekeeper-selfgate.yml's SECURITY NOTE for the full rationale.
+#
+# This file is the opposite: purely advisory, safe to load and execute PR
+# head code under `pull_request` (GitHub automatically downgrades the
+# GITHUB_TOKEN to read-only, secret-less for fork PRs on this event). It
+# must never be renamed/repurposed into a required check, and it must
+# never be merged back into the same file as a privileged job.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    concurrency:
+      group: gatekeeper-ci-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      - name: Checkout pull request
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Lint (biome)
+        run: npx biome check src tests scripts
+
+      - name: Governance ledger checker
+        run: npm run check:governance

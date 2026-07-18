@@ -87,6 +87,17 @@ export function resolvePullRequestNumber(payload: unknown, eventName?: string): 
 		const first = suite.pull_requests[0];
 		return isRecord(first) ? positiveInteger(first.number) : null;
 	}
+	// This branch also resolves `pull_request_review` payloads (which carry a
+	// top-level `pull_request` key), kept intentionally even though this
+	// repo's own trusted workflows (see .github/workflows/gatekeeper-
+	// selfgate.yml and examples/workflows/gatekeeper-gate.yml) no longer
+	// trigger on `pull_request_review` -- its workflow definition loads from
+	// the PR's merge commit rather than the base branch, so it cannot safely
+	// appear in a required-check-producing workflow's trigger list (see
+	// tasks/LESSONS.md). Removing this reverse-lookup branch would be a
+	// behavior change outside this fix's scope; it stays available for a
+	// future trusted bridging path (e.g. a `workflow_run` relay) that still
+	// needs to parse a `pull_request_review`-shaped payload.
 	if (isRecord(payload.pull_request)) {
 		return positiveInteger(payload.pull_request.number);
 	}

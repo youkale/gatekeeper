@@ -19,7 +19,7 @@
 
 ## 参考 workflow 要点（模板即文档）
 
-- gate workflow 触发：`pull_request_target: [opened, synchronize, reopened, labeled, unlabeled]` + `pull_request_review: [submitted, dismissed]` + `check_suite: [completed]`；并发组 per-PR cancel-in-progress。
+- gate workflow 触发：`pull_request_target: [opened, synchronize, reopened, labeled, unlabeled]` + `pull_request_review: [submitted, dismissed]` + `check_suite: [completed]`；并发组 per-PR cancel-in-progress。**[2026-07-18 勘误]** `pull_request_review` 的 workflow 定义本身取自 PR merge commit（非受信 base ref），job 内任何 checkout 加固都无法补救；该触发器已从参考 workflow 移除，改用 `pull_request_target`（push/label）+ `check_suite: completed` + `schedule` cron 兜底重算的受信重触发模式。`src/action.ts` 中 `pull_request_review` payload 的反查分支保留不删（见 `tests/action-env.test.ts`），仅不再出现在受信 workflow 的触发器列表中。详见 `tasks/LESSONS.md` 与 `examples/workflows/gatekeeper-gate.yml` 的安全说明注释。
 - 注释中写明三条铁律：此 workflow 永不 checkout PR 头部代码（pull_request_target 安全不变量）；仅 checkout 注册表 repo（actions/checkout with repository/token/path）；required check 名必须与 branch protection 一致（gatekeeper doctor 校验）。
 - override label（`gatekeeper:override`）说明与 labeled/unlabeled 重触发。
 - check workflow（软提示模式）：普通 `pull_request` + enforce=soft。

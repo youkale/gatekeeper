@@ -1,0 +1,15 @@
+apiVersion: gatekeeper/v1
+name: governance-rules
+description: >-
+  The dev-governance rulebook (CLAUDE.md dispatch table and process rules,
+  AGENTS.md vendor-neutral entry point, the .claude/agents/** role roster,
+  and tasks/LEDGER.md's table structure). Changes here should be visible to
+  everyone, not blocked: notify-only.
+level: notify-only
+authority:
+  repo: youkale/gatekeeper
+  paths:
+    - CLAUDE.md
+    - AGENTS.md
+    - .claude/agents/**
+    - tasks/LEDGER.md

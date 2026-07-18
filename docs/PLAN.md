@@ -72,7 +72,7 @@ consumers:
 ## GitHub 机制要点
 
 - 硬阻塞 = job exit code + branch protection required check；`doctor` 校验配置真实生效。
-- **Gate 重触发是核心设计**：workflow 除 `pull_request` 外必须监听 `pull_request_review` + `check_suite: completed`，否则 gate 在 reviewer 完成前先跑、永远红。参考 workflow 模板直接内置。
+- **Gate 重触发是核心设计**：workflow 除 `pull_request` 外必须监听 `pull_request_review` + `check_suite: completed`，否则 gate 在 reviewer 完成前先跑、永远红。参考 workflow 模板直接内置。**[2026-07-18 勘误]** `pull_request_review` 的 workflow 定义本身取自 PR merge commit（非受信 base ref），job 内任何 checkout 加固都无法补救；该触发器已从参考 workflow 移除，改用 `pull_request_target`（push/label）+ `check_suite: completed` + `schedule` cron 兜底重算的受信重触发模式。详见 `tasks/LESSONS.md` 与 `examples/workflows/gatekeeper-gate.yml`/`.github/workflows/gatekeeper-selfgate.yml` 的安全说明注释。
 - Fork PR：引擎只消费 API 文件列表、从不 checkout PR 代码 → `pull_request_target` 是安全的，此不变量写入文档并在 action 内强调。
 - 台账 MVP 不从 CI 写任何存储：**sticky comment 内嵌 fenced JSON 块即台账行**，`stats` 按需从 API 收割已合并 PR 聚合。本地 CLI 用户另有 JSONL。零写入基建、零竞态、零额外 token 权限。SQLite 砍掉。
 

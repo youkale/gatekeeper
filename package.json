@@ -22,7 +22,8 @@
     "build": "tsup",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check:governance": "node scripts/check-governance.mjs"
   },
   "dependencies": {
     "commander": "^12.1.0",

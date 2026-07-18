@@ -15,9 +15,13 @@
 
 **MVP 全里程碑（M0–M8）已交付。** 最终状态：298 测试全绿、SPEC/README 落地、真实生态验收通过。
 
-| T-20260718-09 | 治理硬化 | 自身注册表 + 自门禁 workflow + 台账机器检查器（用户提出的可移植性/自治四缺口之 ③④） | sonnet-coder | DISPATCH | 进行中 | - |
+| T-20260718-09 | 治理硬化 | 自身注册表 + 自门禁 workflow + 台账检查器（四缺口 ③④） | sonnet-coder | 5 轮（R1 三路 FAIL→R2/R3 codex 逐层击穿→deep-reasoner 仲裁推翻 review 触发器设计→R4 双 FAIL→终案：ruleset 锁文件部署模型） | ✅ 验收提交 | records/T-20260718-09-governance-hardening.md |
 
 ### 遗留债队列（活动，v1.1 候选）
+
+- [T-09] doctor 增加 gate workflow 触发器 lint（required-check job 监听 pull_request/pull_request_review 即告警）——deep-reasoner 裁决建议的纵深防御，self-gate 升 hard 的前置门禁之一
+- [T-09] 受信 review 事件中继（workflow_run 桥接或定时在最新 SHA 重发官方 check 并对 block 置败）——消除 stale-pass 窗口，enforce: hard 的硬前置
+- [T-09] schedule 兜底 job 真实 GitHub runner 联调（gh pr list 循环、GITHUB_OUTPUT 路径未经真实环境验证）
 
 - [T-07] pi-extension npm 自包含发布（tarball 打包 ../src）；真实 pi 运行时联调（pi -e / pi install 路径）
 - [T-01] registry alias 错误 throw 丢弃已累积 issue，按需累积化（诊断完整性，非判定缺陷）

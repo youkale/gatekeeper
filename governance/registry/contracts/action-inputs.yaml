@@ -1,0 +1,17 @@
+apiVersion: gatekeeper/v1
+name: action-inputs
+description: >-
+  CLAUDE.md invariant #3: action.yml's `inputs` block (mode/registry-path/
+  enforce/github-token). Renaming an input, changing its default, or
+  redefining its accepted values breaks every workflow that invokes this
+  action with `uses:`.
+level: breaking-review-required
+authority:
+  repo: youkale/gatekeeper
+  paths:
+    - action.yml
+consumers:
+  - repo: youkale/gatekeeper
+    paths:
+      - examples/workflows/**
+    role: consumer

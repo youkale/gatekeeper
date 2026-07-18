@@ -124,18 +124,25 @@ A contract gate depends on more than source pushes, so it must rerun when its ev
 
 - PR changes: `opened`, `synchronize`, and `reopened`.
 - Operator override changes: `labeled` and `unlabeled`.
-- Review evidence changes: `pull_request_review` `submitted` and `dismissed`.
 - Check evidence changes: `check_suite` `completed`.
 
-The reference gate workflow includes all of these triggers and uses per-PR concurrency with in-progress cancellation. The advisory check workflow uses the PR and label events relevant to local diff reporting.
+The reference gate workflow includes these triggers and uses per-PR concurrency with in-progress cancellation. The advisory check workflow uses the PR and label events relevant to local diff reporting.
+
+Notably absent: `pull_request_review`. A human review submission therefore does not by itself retrigger the gate — see [Fork safety invariant](#fork-safety-invariant) for why, and for the recommended `schedule` cron fallback. Recomputation still happens on the next push/label toggle or check-suite completion. Until one of those fires, the gate result is stale relative to a just-submitted review. Be aware that staleness cuts both ways: a gate that last evaluated green stays green on that SHA even if an approval is later dismissed or a changes-requested review lands, so a **stale pass can allow a merge** until the next push/label/check-suite recomputation. Compensating controls: enable GitHub's native branch-protection options *Dismiss stale pull request approvals when new commits are pushed* and *Require approval of the most recent reviewable push*, and add the `schedule` fallback below. A trusted review-event relay (or a scheduled job that re-issues the official required check on each PR's latest SHA and fails on block) is a precondition for promoting `enforce: soft` to `hard`; until then treat hard mode as unsuitable for repos where review evidence can be dismissed.
 
 ### Fork safety invariant
 
 The enforcing workflow uses `pull_request_target` so it can read trusted configuration and update the PR for forks. It MUST NEVER check out, import, or execute code from the pull request head. The only checkout in that workflow is the trusted registry repository. Do not add a PR-head checkout, a script sourced from the PR, or an action path controlled by the PR.
 
+`pull_request_review` MUST NOT be added to the enforcing workflow's triggers, and this is not a checkout-scoping detail you can fix inside the job. For `pull_request_review` (and any other event whose workflow definition is sourced from PR-controlled content), GitHub Actions loads the *workflow YAML itself* from the pull request's merge commit rather than from the base branch — unlike `pull_request_target`, whose workflow definition is guaranteed to load from, and only from, the base branch. A pull request could therefore rewrite the enforcing workflow file to remove its own safety checks, and that PR-controlled version — not the base-branch version reviewed and merged by maintainers — is what would execute. No step added inside the job can remediate this, because the compromise happens before any step runs, at workflow-selection time.
+
+A required check may only be produced by a workflow whose definition is guaranteed to load from a trusted ref: `pull_request_target`, `check_suite`, `workflow_run`, or `schedule`. The advisory check workflow (plain `pull_request`) may still read/execute PR content precisely because it is advisory — it MUST NOT share the enforcing job's name and MUST NOT be configured as a branch-protection required check, or a PR could satisfy/spoof the required check with output from its own untrusted code.
+
+If your org needs a review-only PR update to refresh the gate without waiting for a push, label toggle, or check-suite completion, add a `schedule` cron trigger with a job that re-runs `gatekeeper gate` for every open PR (this repository's own `.github/workflows/gatekeeper-selfgate.yml` is a worked example of that fallback).
+
 ### Required check setup
 
-Use a stable explicit job name, such as `gatekeeper-gate`, and configure that exact name as a required status check in the protected branch ruleset. Validate the external wiring after every workflow or branch-protection change:
+Do **not** rely on a name-matched required status check: GitHub required checks match by check name only, regardless of which workflow produced them, so any PR that adds or edits a `pull_request`-triggered workflow can emit a same-named green check and spoof the gate. Instead, create a repository **ruleset** with the *Require workflows to pass* rule pinned to the gate workflow file on the default branch (for example `.github/workflows/gatekeeper-gate.yml`). Keep a stable explicit job name, such as `gatekeeper-gate`, for doctor validation and log clarity. Validate the external wiring after every workflow or branch-protection change:
 
 ```bash
 gatekeeper doctor \

@@ -1,0 +1,16 @@
+apiVersion: gatekeeper/v1
+# `lanes` is intentionally omitted: `validate`/`check`/`gate` merge the
+# packaged `lanes.d/*.yaml` presets (human/coderabbit/copilot/greptile) into
+# an absent `policy.lanes` (see docs/SPEC.md §1.1). The `human` lane below
+# therefore resolves to lanes.d/human.yaml (min: 1, fresh: true) without
+# redeclaring it here and triggering a user-wins preset-collision warning.
+levels:
+  breaking-review-required:
+    enforcement: block
+    require:
+      m: 1
+      lanes:
+        - human
+  notify-only:
+    enforcement: warn
+    require: {}

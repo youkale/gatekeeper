@@ -1,0 +1,28 @@
+apiVersion: gatekeeper/v1
+name: engine-standard-surface
+description: >-
+  CLAUDE.md invariant #3, first bullet: the contract/policy schema and verdict
+  JSON shape. src/engine/schema.ts (zod schema), src/engine/types.ts, and
+  src/engine/verdict.ts define the runtime-checked schema and the emitted
+  Verdict shape. Any change is breaking-review-required. (A published
+  schema/** JSON Schema export does not exist yet -- add its glob back here
+  once that directory has at least one tracked file, per audit semantics: a
+  glob must hit >=1 tracked file.)
+level: breaking-review-required
+authority:
+  repo: youkale/gatekeeper
+  paths:
+    - src/engine/schema.ts
+    - src/engine/types.ts
+    - src/engine/verdict.ts
+consumers:
+  - repo: youkale/gatekeeper
+    paths:
+      - pi-extension/index.ts
+    role: consumer
+    verify: npm test
+  - repo: youkale/gatekeeper
+    paths:
+      - src/commands/**
+    role: consumer
+    verify: npm test

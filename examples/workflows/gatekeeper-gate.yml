@@ -1,10 +1,65 @@
 name: Gatekeeper Gate
 
+# SECURITY NOTE -- do not add `pull_request_review` (or any other event
+# whose workflow definition is sourced from PR-controlled content) to the
+# trigger list below. For `pull_request_review`, GitHub Actions loads the
+# *workflow YAML itself* from the pull request's merge commit, not from the
+# base branch -- unlike `pull_request_target`, which is defined by, and
+# always loads from, the base branch. This is documented GitHub Actions
+# behavior, not a config mistake. A pull request could therefore rewrite
+# this very file (e.g. delete the fork-safety checkout-scoping below, or add
+# a step that exfiltrates `secrets.GATEKEEPER_REGISTRY_TOKEN`), and that
+# PR-rewritten version -- not this base-branch version -- is what would
+# execute. No step added *inside* the job below can remediate this, because
+# the compromise happens before any step runs, at workflow-selection time.
+#
+# A required check may only be produced by a workflow whose definition is
+# guaranteed to load from a trusted ref: `pull_request_target`,
+# `check_suite`, `workflow_run`, or `schedule`. A separate, purely advisory
+# workflow (such as examples/workflows/gatekeeper-check.yml, driven by plain
+# `pull_request`) may still read/execute PR content precisely because it is
+# advisory -- it MUST NOT share this job's name ("gatekeeper-gate") and MUST
+# NOT be configured as a branch-protection required check, or a PR could
+# satisfy/spoof the required check with output from its own untrusted code.
+#
+# DEPLOYMENT WARNING -- do NOT wire this job up with a classic
+# branch-protection "required status check" matched by name (picking
+# "gatekeeper-gate" from the check-name list). GitHub matches required
+# status checks by NAME ONLY, regardless of which workflow produced them --
+# any PR can add its own `pull_request`-triggered workflow with a job
+# literally named `gatekeeper-gate` that always passes, and a name-matched
+# required check cannot tell that forged green check apart from this one.
+# Use a repository ruleset's "Require workflows to pass" rule instead,
+# pinned to this exact file on your default branch -- that binds
+# enforcement to the workflow FILE's identity, not a spoofable name string.
+#
+# One consequence of dropping `pull_request_review`: a human review
+# submission no longer retriggers this gate by itself. Recomputation still
+# happens on push/label-toggle (pull_request_target) and check-suite
+# completion (check_suite); add a `schedule` cron trigger with a job that
+# re-runs `gatekeeper gate` for open PRs (see
+# .github/workflows/gatekeeper-selfgate.yml in the Gatekeeper repository
+# for a worked example) if your org needs review-only updates to refresh
+# the gate without waiting for one of those.
+#
+# Be honest with yourself about what that leaves open: if this gate already
+# went green at a SHA (e.g. an approval was recorded), and a reviewer then
+# dismisses that approval or leaves a new CHANGES_REQUESTED review on the
+# SAME SHA (no new push), the already-green check STAYS green -- GitHub
+# does not retroactively fail an already-passed check -- until something
+# recomputes it. That is a real stale-PASS window a merge could land in,
+# not merely "a delay in showing a new pass". Compensating controls to
+# configure alongside this gate, not instead of it: enable GitHub's native
+# "Require a pull request before merging" review requirement (it recomputes
+# live on every merge attempt and is not subject to this check's
+# staleness), and "Require approval of the most recent reviewable push" to
+# close the push-side half of staleness. Treat a trusted, low-latency
+# review-event relay -- or an equivalently short schedule interval -- that
+# re-asserts this check at the PR's current SHA as a PRECONDITION for
+# `enforce: hard`, not an optional hardening step.
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, labeled, unlabeled]
-  pull_request_review:
-    types: [submitted, dismissed]
   check_suite:
     types: [completed]
 
