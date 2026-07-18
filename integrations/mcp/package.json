@@ -1,0 +1,43 @@
+{
+	"name": "gatekeeper-mcp",
+	"version": "0.1.0",
+	"description": "MCP (Model Context Protocol) server for Gatekeeper: exposes gatekeeper_check, gatekeeper_validate, and gatekeeper_brief over stdio for any MCP client (Claude Code, Cursor, Codex, ...).",
+	"license": "Apache-2.0",
+	"type": "module",
+	"keywords": [
+		"mcp",
+		"gatekeeper",
+		"contracts",
+		"merge-gate",
+		"model-context-protocol"
+	],
+	"main": "index.ts",
+	"bin": {
+		"gatekeeper-mcp": "dist/index.js"
+	},
+	"exports": {
+		".": "./index.ts"
+	},
+	"files": [
+		"index.ts",
+		"testing.ts",
+		"dist",
+		"README.md"
+	],
+	"engines": {
+		"node": ">=20"
+	},
+	"scripts": {
+		"build": "tsup",
+		"typecheck": "tsc --noEmit"
+	},
+	"dependencies": {
+		"@modelcontextprotocol/sdk": "^1.29.0",
+		"zod": "^3.25.76"
+	},
+	"devDependencies": {
+		"@types/node": "^20.19.43",
+		"tsup": "^8.5.1",
+		"typescript": "^5.9.3"
+	}
+}

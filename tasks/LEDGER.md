@@ -22,6 +22,8 @@
 
 | T-20260719-01 | 中立化 | agent 绑定纠偏 A：integrations/pi 迁移 + docs/roles 角色卡 + RuntimeAvailabilityProvider 解耦 + 全面文案中立 | sonnet-coder | R1: claude PASS + grok PASS（共 6 nb，4 项润色验收时落实） | ✅ 验收提交 | records/T-20260719-01-agent-neutrality.md |
 
+| T-20260719-02 | 中立化 | agent 绑定纠偏 B：integrations/mcp MCP server（三工具，真实协议测试） | sonnet-coder | R1: claude FAIL(活体协议损坏复现)+grok FAIL(SDK 源码取证)同一并发缺陷；R2: claude PASS（真实 stdio 12 路并发零污染） | ✅ 验收提交 | records/T-20260719-02-mcp-server.md |
+
 ### 遗留债队列（活动，v1.1 候选）
 
 - [v1.1] enforce: hard 的真实前置：受信外部通道（GitHub App/webhook → repository_dispatch 触发默认分支 workflow）——workflow_run 桥接已实现但可被 PR 压制脉冲，仅 best-effort（T-11 裁决结论）

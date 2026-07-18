@@ -50,6 +50,14 @@ jobs:
       - name: Install integrations/pi dependencies
         run: npm ci --prefix integrations/pi
 
+      # integrations/mcp is a separate package (the host-agnostic MCP server
+      # adapter); unlike pi's type-only devDependency, its runtime dependency
+      # (@modelcontextprotocol/sdk) is imported for real by tests/integrations-mcp.test.ts
+      # (a genuine client/server protocol round trip over InMemoryTransport),
+      # so it is required by both the root typecheck and root test run.
+      - name: Install integrations/mcp dependencies
+        run: npm ci --prefix integrations/mcp
+
       - name: Typecheck
         run: npm run typecheck
 

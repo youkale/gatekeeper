@@ -6,6 +6,19 @@ import { RegistryReadError } from "../providers/fsregistry.js";
 export interface ValidateOptions {
 	registry: string;
 	strict?: boolean;
+	/**
+	 * Output sinks. Optional and additive: default to the real
+	 * process.stdout/stderr, so the CLI (src/cli.ts, which never sets these)
+	 * is unchanged. A long-lived host that runs multiple commands
+	 * concurrently over one process (e.g. the MCP server in
+	 * integrations/mcp/index.ts, which may have another in-flight JSON-RPC
+	 * response frame writing to the same real stdout at the same time)
+	 * should inject its own sink instead of temporarily monkey-patching the
+	 * global stream — see integrations/mcp/index.ts's runGatekeeperValidate
+	 * for why that global-patch approach is unsafe in that context.
+	 */
+	stdout?: (chunk: string) => void;
+	stderr?: (chunk: string) => void;
 }
 
 function isBareDoubleStar(glob: string): boolean {
@@ -56,24 +69,27 @@ function lintRegistry(registry: Registry): RegistryIssue[] {
 }
 
 export async function runValidate(options: ValidateOptions): Promise<number> {
+	const writeStdout = options.stdout ?? ((chunk: string) => void process.stdout.write(chunk));
+	const writeStderr = options.stderr ?? ((chunk: string) => void process.stderr.write(chunk));
+
 	let loaded: Awaited<ReturnType<typeof loadRegistryWithLanePresets>>;
 	try {
 		loaded = await loadRegistryWithLanePresets(options.registry);
 	} catch (error) {
 		if (error instanceof RegistryParseError) {
 			for (const issue of error.issues) {
-				process.stderr.write(`${formatRegistryIssue(issue)}\n`);
+				writeStderr(`${formatRegistryIssue(issue)}\n`);
 			}
 			return 2;
 		}
 		if (error instanceof LanePresetParseError) {
 			for (const issue of error.issues) {
-				process.stderr.write(`${issue.file} ${issue.path}: ${issue.message}\n`);
+				writeStderr(`${issue.file} ${issue.path}: ${issue.message}\n`);
 			}
 			return 2;
 		}
 		if (error instanceof RegistryReadError || error instanceof LanePresetReadError) {
-			process.stderr.write(`gatekeeper validate: ${error.reason}\n`);
+			writeStderr(`gatekeeper validate: ${error.reason}\n`);
 			return 2;
 		}
 		throw error;
@@ -82,18 +98,16 @@ export async function runValidate(options: ValidateOptions): Promise<number> {
 
 	const warnings = [...registry.warnings, ...lintRegistry(registry)];
 	for (const warning of warnings) {
-		process.stderr.write(`warning: ${formatRegistryIssue(warning)}\n`);
+		writeStderr(`warning: ${formatRegistryIssue(warning)}\n`);
 	}
 	for (const conflict of loaded.conflicts) {
-		process.stderr.write(
+		writeStderr(
 			`warning: policy lane ${conflict.lane} overrides preset ${conflict.presetFile}; ${conflict.resolution} (${conflict.userFile})\n`,
 		);
 	}
 	const warningCount = warnings.length + loaded.conflicts.length;
 
-	process.stdout.write(
-		`gatekeeper validate: OK (${registry.contracts.length} contract(s), ${warningCount} warning(s))\n`,
-	);
+	writeStdout(`gatekeeper validate: OK (${registry.contracts.length} contract(s), ${warningCount} warning(s))\n`);
 
 	if (warningCount > 0 && options.strict) {
 		return 1;

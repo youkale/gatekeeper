@@ -187,9 +187,9 @@ The repo-root `roles-policy.yaml` defines data-only model tiers consumed by thes
 
 Gatekeeper intersects those preferences with whatever agent-runtime availability it can detect (a pluggable `RuntimeAvailabilityProvider`; pi's local config is the only one shipped today, other runtimes degrade to "unknown, non-blocking"). `doctor` reports tier gaps; `triage` uses the resolved candidates in its briefing and validates the posted reviewer count. The policy selects dispatch candidates but never invokes a model itself.
 
-### MCP server (planned)
+### MCP server
 
-A Model Context Protocol server exposing `gatekeeper_check` and the role briefings to any MCP-capable agent is planned as a second, host-agnostic integration surface. Not yet implemented.
+The [`integrations/mcp/`](integrations/mcp/) package is a standalone [Model Context Protocol](https://modelcontextprotocol.io) server: a stdio-transport process exposing `gatekeeper_check`, `gatekeeper_validate`, and `gatekeeper_brief` to any MCP-capable client (Claude Code, Cursor, Codex, ...), not just pi. Like the pi extension, it is a thin wrapper around the same registry loader, Git diff provider, and verdict engine — it does not duplicate policy logic and makes zero model calls itself. See [`integrations/mcp/README.md`](integrations/mcp/README.md) for client setup (Claude Code, Cursor, generic `mcpServers` JSON) and tool semantics.
 
 ### pi extension (example adapter)
 

@@ -2,6 +2,8 @@
 
 - [T-20260718-09] **gate/关口类 workflow 审查必须先问"job 定义从哪个 commit 加载"，再问"checkout 什么"**——pull_request_review 事件的 workflow 定义取自 PR merge commit（与 pull_request 同、与 pull_request_target 异），job 内任何受信 checkout 都无法补救定义层被改写；该缺陷从 M3 压力测试建议（"必须监听 pull_request_review 防卡红"）一路带到已发布模板，历经多轮 review 才被 codex 在定义加载层击穿、deep-reasoner 官方文档取证裁定 → 规范：**required check 只能由定义取自受信 ref 的 workflow（pull_request_target/check_suite/workflow_run/schedule）产出**；advisory workflow 绝不与 gate 同名 → 处置：已按裁决修复全波及面；doctor 触发器 lint 记遗留债；若触发器信任语义误判再现，固化进 SPEC 规范性条款。
 
+- [T-20260719-02] 先例引用不豁免安全假设：captureCommand（全局 stdout 接管）在单发 Action 进程安全，被照搬进常驻并发 MCP server 即造成协议流损坏——复用既有模式必须重验其安全前提（进程生命周期/并发模型/共享资源）在新语境是否仍成立；与「每新增进程入口须重装 EPIPE 守卫」同族 → 处置：注入式 sink 根除；作显式判例记录。
+
 ## MVP 收官总复盘（2026-07-18）
 
 - **三路对抗 review 的量化战绩**：8 个任务、约 20 轮 review，三路合计报出 30+ 实质缺陷，其中跨路零重叠的独家发现占多数（claude 擅长 fail 方向全路径与语义一致性、codex 擅长权限拓扑/时序绕关/外部事实权威取证、grok 擅长字节级完整性与文件形态）。任何双路组合都会漏掉至少一类。dogfooding 结论：产品的 M-of-N 跨厂商 lane 设计有实证支撑。
