@@ -47,7 +47,7 @@
 | T-20260720-02 | 复杂编码 | dispatch B 包：runner 日志 sink + 活动回调 + 外部 abort + pgid 暴露（向后兼容可选项，设计 §5/拆解表B） | codex | codex 内审 + 外审 claude(opus)/grok 双 PASS | ✅ 验收提交（684 测试） | tasks/records/T-20260720-02-runner-extension.md |
 | T-20260720-03 | 缺陷修复 | filelock.ts 双 stale waiter ABA 竞态（codex 指控、claude 可执行模型证实：盲删 rm 不重验 pid）——D 包硬前置 | sonnet-coder | claude(opus)+grok 双路 3 轮 + 1 仲裁（codex 占线降级，补审随 C 包后执行） | ✅ 验收提交（身份域标记 CAS + nonce 终验） | tasks/records/T-20260720-03-filelock-aba.md |
 
-| T-20260720-04 | 复杂编码（准标准面） | dispatch C 包：结局分类器 + RESULT.json schema + 交付证据检查（设计 §4/§6/拆解表C） | codex | DISPATCH | 进行中 | - |
+| T-20260720-04 | 复杂编码（准标准面） | dispatch C 包：结局分类器 + RESULT.json schema + 交付证据检查（设计 §4/§6/拆解表C） | codex | codex 内审 2 轮 + 外审 claude(opus)/grok 双 PASS；AGENT_ERROR 放宽偏离项经改裁驳回 | ✅ 验收提交（716 测试） | tasks/records/T-20260720-04-classifier-evidence.md |
 
 ### 遗留债队列（活动，v1.1 候选）
 

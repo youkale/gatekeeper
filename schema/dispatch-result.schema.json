@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gatekeeper.dev/schema/dispatch-result.schema.json",
+  "title": "Gatekeeper Dispatch Result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "status", "summary"],
+  "properties": {
+    "apiVersion": {
+      "const": "gatekeeper/v1"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["delivered", "blocked"]
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}
