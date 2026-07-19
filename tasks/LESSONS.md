@@ -18,7 +18,7 @@
 条目格式：`- [T-ID] 现象 → 教训 → 处置（无/已修订 <文件>）`
 
 - [T-20260718-05] 编码 agent 产出文件混入不可见 NUL 字节（0x00 伪装空格）：typecheck/lint/测试全绿但 git 判整文件二进制，PR diff 对审查隐身——仅被 grok 第三路（其工具拒读二进制）暴露 → 交付验收与 review 都不该只看"测试绿"：新增源文件应过一次文本完整性检查（`file` 输出非文本 / `git diff` 报 Binary 即异常）→ 处置：修复清单已含全仓自查；若再现将把文本完整性检查写入 sonnet-coder/claude-reviewer 角色文件。**根因补充（修复轮定位）**：疑似 Write 工具在内容含 `}${`（模板字面量相邻边界）处插入控制字节的工具层缺陷；规避写法：拼接键值用数组 `.join()` 而非相邻模板插值；含大量模板字面量的新文件写完做一次 `file`/字节自查。
-- [T-20260718-02/-04] EPIPE 守卫在 cli.ts 修过后，M4 新入口 action.ts 复发同类缺失（守卫未随"新进程入口"同步）→ 同类问题 ≥2 次触发规范：**每新增进程入口（bin/action/未来 mcp）必须装 stdout/stderr EPIPE 守卫，review 检查单固定项** → 处置：M4 修复清单执行中；已计入 claude-reviewer 对抗口径的沿用实践。
+- [T-20260718-02/-04 + T-20260719-04/-07] 守卫不随新入口/新 spawn 点同步 ×2 族：EPIPE 守卫（cli→action 复发）与**进程组终止**（runner.ts 修过后 detect.ts 的 --version 探测复发）→ 规范升格：**凡新增进程入口装 EPIPE 守卫、凡新增 spawn 点（尤其 shell:true 或可能派生后代的）装进程组终止**，两者均为 review 检查单固定项；code-reviewer 角色卡判例 #2 措辞据此覆盖 spawn 点 → 处置：T-07 修复中；角色卡下次修订同步。
 - [T-20260718-01/-03] yaml `document.toJS()` 未守卫抛裸异常 ×2（M1 registry.ts、M3 doctor.ts——第二处还把异常误分类成基建警告 fail-open）→ 同类问题达 2 次，触发规范修订：**凡调用 yaml 库 toJS()/toJSON() 一律经守卫包装并按调用语境显式分类（关口命令→degrade；健康命令→配置错误非零）**，review 检查单加此项 → 处置：已写入 claude-reviewer 对抗清单口径（哨兵/异构输入项已覆盖），M3 R2 修复中；后续新 YAML 调用点 review 时按此执行。
 - [M0 补遗] 调度者裁阵容时砍掉了 grok-coder/grok-reviewer，被用户指出——跨厂商第三视角是防同源盲区的结构性设计，不是可选项；且降级链（codex 挂 → grok 顶上）依赖它 → 移植参照系阵容时，"裁剪"须逐项给出理由并向用户确认，默认全量移植 → 处置：已补 grok 双角色 + CLAUDE.md 分派表与降级链修订。
 - [PR#1 自门禁首航] fresh-clone 类问题第 3 例：pi-extension 子包 devDep 只在其自身 package.json，根 `npm ci` 不装，本机残留 node_modules 掩盖，CI typecheck 即挂——被自门禁 PR 的 ci job 当场抓获（工具开始养活自己）→ 同类 ≥3 次，规范升级：**验收命令必须在等价 fresh 环境语义下可复现**（ls-files 对照、子包依赖显式安装步骤、无本地残留假设），写入 claude-reviewer 检查单候选 → 处置：ci.yml 补 npm ci --prefix pi-extension（随 PR#1 合入）。

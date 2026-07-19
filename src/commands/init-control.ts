@@ -1,9 +1,12 @@
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import { renderAgentsFile } from "../agent/agentsFile.js";
+import { assignRolesToClis } from "../agent/assign.js";
+import { type DetectedAgentCli, detectAgentClis } from "../agent/detect.js";
 import { saveRepos } from "../config/repos.js";
 import { packagedRoleCardPath, ROLE_CARD_NAMES, RoleCardNotFoundError } from "../roles/cards.js";
-import { defaultRolesPolicyPath } from "../roles/policy.js";
+import { defaultRolesPolicyPath, parseRolesPolicy, RolesPolicyParseError } from "../roles/policy.js";
 import { runValidate } from "./validate.js";
 
 /**
@@ -26,12 +29,34 @@ import { runValidate } from "./validate.js";
  * a fresh scaffold is expected to validate clean, but a rerun over a
  * since-customized registry should still surface real problems rather than
  * silently declaring success.
+ *
+ * Unless `--no-detect` is given, this command also probes the local machine
+ * for known agent CLIs (src/agent/detect.ts) and assigns each roles-policy
+ * tier to one (src/agent/assign.ts), writing the result to
+ * `governance/agents.yaml` (src/agent/agentsFile.ts). Unlike `repos.yaml`,
+ * `governance/agents.yaml` *is* a regenerable template: `--force` re-detects
+ * and overwrites it (a hand-edited copy would be lost) -- see its own header
+ * comment. Unconditionally (even under --no-detect, since this is a
+ * validation of the control repo's own config, not part of the detection
+ * step it gates), this command reads the control repo's *own*
+ * `roles-policy.yaml` off disk at this point (freshly written from the
+ * packaged default, or a pre-existing hand-customized copy a skip left
+ * untouched) -- never the in-memory packaged content -- and fails closed
+ * (exit 2) if that file exists but fails to parse, rather than silently
+ * falling back to packaged tier preferences.
  */
 
 export interface InitControlOptions {
 	/** Control repo root to create/populate; resolved relative to cwd. */
 	path: string;
 	force?: boolean;
+	/** Set to false (via --no-detect) to skip local agent CLI detection and governance/agents.yaml generation entirely. Defaults to true (detect). */
+	detect?: boolean;
+}
+
+export interface InitControlDependencies {
+	/** Injectable local-CLI detector (defaults to detectAgentClis) -- tests stub PATH/spawn without touching the real machine. */
+	detectAgentClis?: typeof detectAgentClis;
 }
 
 interface GeneratedLine {
@@ -193,7 +218,11 @@ function summarize(lines: GeneratedLine[]): string[] {
 	});
 }
 
-export async function runInitControl(options: InitControlOptions, cwd: string): Promise<number> {
+export async function runInitControl(
+	options: InitControlOptions,
+	cwd: string,
+	dependencies: InitControlDependencies = {},
+): Promise<number> {
 	const controlRoot = path.resolve(cwd, options.path);
 	const force = Boolean(options.force);
 	await mkdir(controlRoot, { recursive: true });
@@ -233,9 +262,86 @@ export async function runInitControl(options: InitControlOptions, cwd: string): 
 		lines,
 	);
 
+	// Read + parse the control repo's *own* roles-policy.yaml on disk -- not the in-memory
+	// packaged content read above -- so a hand-customized copy (e.g. from a prior --no-detect
+	// run, then hand-edited, then rerun) is honored rather than silently overridden by the
+	// packaged default's tier prefer/count/cross_vendor values. writeArtifact above guarantees
+	// this file exists by this point (freshly written, or a pre-existing customization left
+	// untouched by a skip) -- falling back to the packaged content is therefore only a
+	// defensive degrade for the unexpected case where it's still missing, not the routine path.
+	//
+	// This validation runs *unconditionally*, regardless of --no-detect: an existing-but-
+	// malformed roles-policy.yaml is a real configuration defect (most likely a bad hand-edit)
+	// that must fail closed every time this command touches the control repo, not only on runs
+	// that happen to also perform detection. Only the detection/assignment/agents.yaml-writing
+	// work below is gated on `options.detect`.
+	const controlRolesPolicyPath = path.join(controlRoot, "roles-policy.yaml");
+	const rolesPolicyContentForAssignment = (await pathExists(controlRolesPolicyPath))
+		? await readFile(controlRolesPolicyPath, "utf8")
+		: rolesPolicySourceContent;
+
+	let rolesPolicy: ReturnType<typeof parseRolesPolicy>;
+	try {
+		rolesPolicy = parseRolesPolicy(rolesPolicyContentForAssignment, controlRolesPolicyPath);
+	} catch (error) {
+		if (!(error instanceof RolesPolicyParseError)) {
+			throw error;
+		}
+		// Fail-closed: an existing-but-malformed roles-policy.yaml is a real configuration
+		// defect that must never be silently swallowed into "just use the packaged defaults
+		// instead" -- the operator needs to fix it.
+		process.stderr.write(
+			`gatekeeper init-control: control repo's roles-policy.yaml (${controlRolesPolicyPath}) failed to parse: ${error.message}\n`,
+		);
+		return 2;
+	}
+
+	let detected: DetectedAgentCli[] = [];
+	let assignSummary: { assignments: ReturnType<typeof assignRolesToClis>["assignments"]; warnings: string[] } = {
+		assignments: [],
+		warnings: [],
+	};
+	if (options.detect !== false) {
+		detected = await (dependencies.detectAgentClis ?? detectAgentClis)();
+		assignSummary = assignRolesToClis({ detected, rolesPolicy });
+		await writeArtifact(
+			controlRoot,
+			path.join(controlRoot, "governance", "agents.yaml"),
+			renderAgentsFile({ detected, assignments: assignSummary.assignments, warnings: assignSummary.warnings }),
+			force,
+			lines,
+		);
+	}
+
 	process.stdout.write(`gatekeeper init-control: ${lines.length} artifact(s) at ${controlRoot}\n`);
 	for (const line of summarize(lines)) {
 		process.stdout.write(`${line}\n`);
+	}
+
+	if (options.detect === false) {
+		process.stdout.write("\ngatekeeper init-control: skipped agent CLI detection (--no-detect)\n");
+	} else {
+		process.stdout.write("\ngatekeeper init-control: detected agent CLI(s):\n");
+		if (detected.length === 0) {
+			process.stdout.write(
+				"  (none found on PATH -- see KNOWN_AGENT_CLIS in src/agent/detect.ts for the supported list)\n",
+			);
+		} else {
+			for (const cli of detected) {
+				process.stdout.write(`  ${cli.name} (${cli.vendor}) ${cli.version ?? "version unknown"} -- ${cli.path}\n`);
+			}
+		}
+		process.stdout.write("\ngatekeeper init-control: role assignment:\n");
+		if (assignSummary.assignments.length === 0) {
+			process.stdout.write("  (no role could be assigned from detected agent CLIs)\n");
+		} else {
+			for (const assignment of assignSummary.assignments) {
+				process.stdout.write(`  ${assignment.role}: ${assignment.cliName} (${assignment.vendor})\n`);
+			}
+		}
+		for (const warning of assignSummary.warnings) {
+			process.stderr.write(`warning: ${warning}\n`);
+		}
 	}
 
 	process.stdout.write("\ngatekeeper init-control: validating the generated registry...\n");

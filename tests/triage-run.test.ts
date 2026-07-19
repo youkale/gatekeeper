@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { stringify } from "yaml";
 
 import { runAgentCommand } from "../src/agent/runner.js";
 import { runTriage, type TriageDependencies, type TriageOptions } from "../src/commands/triage.js";
@@ -93,6 +94,25 @@ function nonZeroExitCommand(): string {
 function sleepForeverCommand(): string {
 	const script = "setTimeout(()=>{}, 60000);";
 	return `${JSON.stringify(NODE)} -e ${JSON.stringify(script)} {brief} {out}`;
+}
+
+/** Writes a governance/agents.yaml sibling of `registryDir` (candidate 1 in locateAgentsFile -- registry IS the located directory here) with a single deep-reasoner assignment. */
+async function writeAgentsYaml(registryDir: string, deepReasonerCommand: string): Promise<void> {
+	const content = stringify({
+		apiVersion: "gatekeeper/v1",
+		assignments: [
+			{
+				role: "deep-reasoner",
+				cli: "test-cli",
+				vendor: "test-vendor",
+				command_template: deepReasonerCommand,
+				rationale: "test fixture",
+			},
+		],
+		detected: [],
+		warnings: [],
+	});
+	await writeFile(path.join(registryDir, "agents.yaml"), content, "utf8");
 }
 
 describe("triage --run", () => {
@@ -314,5 +334,130 @@ describe("triage --run", () => {
 		expect(stub.createIssueComment).not.toHaveBeenCalled();
 		const output = stdout.mock.calls.map(([chunk]) => String(chunk)).join("");
 		expect(output).toContain("aborted (not confirmed)");
+	});
+});
+
+describe("triage --run: three-tier agent command resolution chain", () => {
+	let registryDir: string;
+	let cwd: string;
+
+	beforeEach(async () => {
+		vi.spyOn(globalThis, "fetch");
+		registryDir = await mkdtemp(path.join(tmpdir(), "gatekeeper-triage-run-resolve-registry-"));
+		await writeFile(path.join(registryDir, "policy.yaml"), POLICY_YAML, "utf8");
+		await mkdir(path.join(registryDir, "contracts"), { recursive: true });
+		await writeFile(path.join(registryDir, "contracts", "api.yaml"), CONTRACT_YAML, "utf8");
+		cwd = await mkdtemp(path.join(tmpdir(), "gatekeeper-triage-run-resolve-cwd-"));
+	});
+
+	afterEach(async () => {
+		expect(globalThis.fetch).not.toHaveBeenCalled();
+		vi.restoreAllMocks();
+		await rm(registryDir, { recursive: true, force: true });
+		await rm(cwd, { recursive: true, force: true });
+	});
+
+	function baseOptions(overrides: Partial<TriageOptions> = {}): TriageOptions {
+		return { issue: 42, repo: "acme/checkout-service", registry: registryDir, run: true, yes: true, ...overrides };
+	}
+
+	function baseDependencies(
+		stub: ReturnType<typeof providerStub>,
+		overrides: TriageDependencies = {},
+	): TriageDependencies {
+		return {
+			createProvider: () => stub,
+			piConfigDir: path.join(cwd, "no-such-pi-config"),
+			isInteractive: false,
+			...overrides,
+		};
+	}
+
+	it("tier 3: falls back to governance/agents.yaml's deep-reasoner assignment when no .gatekeeper.yml agent: block exists", async () => {
+		await writeAgentsYaml(registryDir, validVerdictCommand());
+		const stub = providerStub();
+		const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+		const exitCode = await runTriage(baseOptions(), cwd, baseDependencies(stub));
+
+		expect(exitCode).toBe(0);
+		expect(stub.createIssueComment).toHaveBeenCalledTimes(1);
+		const output = stdout.mock.calls.map(([chunk]) => String(chunk)).join("");
+		expect(output).toContain("using agent from governance/agents.yaml (deep-reasoner: test-cli)");
+	});
+
+	it("tier 2 (.gatekeeper.yml agent.command) wins over tier 3 (governance/agents.yaml) when both are present", async () => {
+		await writeAgentsYaml(registryDir, nonZeroExitCommand()); // would fail loud if this were the one actually run
+		await writeAgentConfig(cwd, validVerdictCommand());
+		const stub = providerStub();
+		const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+		const exitCode = await runTriage(baseOptions(), cwd, baseDependencies(stub));
+
+		expect(exitCode).toBe(0);
+		const output = stdout.mock.calls.map(([chunk]) => String(chunk)).join("");
+		expect(output).toContain("using agent from .gatekeeper.yml (agent.command)");
+	});
+
+	it("tier 1 (--agent-command) wins over tier 2 (.gatekeeper.yml) and tier 3 (governance/agents.yaml)", async () => {
+		await writeAgentsYaml(registryDir, nonZeroExitCommand());
+		await writeAgentConfig(cwd, nonZeroExitCommand());
+		const stub = providerStub();
+		const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+		const exitCode = await runTriage(baseOptions({ agentCommand: validVerdictCommand() }), cwd, baseDependencies(stub));
+
+		expect(exitCode).toBe(0);
+		const output = stdout.mock.calls.map(([chunk]) => String(chunk)).join("");
+		expect(output).toContain("using agent from --agent-command");
+	});
+
+	it("GATEKEEPER_AGENT_COMMAND env var resolves (tier 1) ahead of .gatekeeper.yml/agents.yaml", async () => {
+		await writeAgentsYaml(registryDir, nonZeroExitCommand());
+		const stub = providerStub();
+		const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+		const exitCode = await runTriage(
+			baseOptions(),
+			cwd,
+			baseDependencies(stub, { env: { ...process.env, GATEKEEPER_AGENT_COMMAND: validVerdictCommand() } }),
+		);
+
+		expect(exitCode).toBe(0);
+		const output = stdout.mock.calls.map(([chunk]) => String(chunk)).join("");
+		expect(output).toContain("using agent from GATEKEEPER_AGENT_COMMAND");
+	});
+
+	it("a governance/agents.yaml with no deep-reasoner assignment falls through to the existing missingAgentMessage error", async () => {
+		const content = stringify({
+			apiVersion: "gatekeeper/v1",
+			assignments: [{ role: "coder", cli: "x", vendor: "y", command_template: "echo hi", rationale: "r" }],
+			detected: [],
+			warnings: [],
+		});
+		await writeFile(path.join(registryDir, "agents.yaml"), content, "utf8");
+		const stub = providerStub();
+		const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+		const exitCode = await runTriage(baseOptions(), cwd, baseDependencies(stub));
+
+		expect(exitCode).toBe(2);
+		expect(stderr.mock.calls.map(([chunk]) => String(chunk)).join("")).toContain('no "agent:" block configured');
+	});
+
+	it("a malformed governance/agents.yaml still falls through to missingAgentMessage (exit 2, not a crash), but names the file/reason on stderr first", async () => {
+		const agentsPath = path.join(registryDir, "agents.yaml");
+		await writeFile(agentsPath, "not: [valid, agents, file", "utf8");
+		const stub = providerStub();
+		const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+		const exitCode = await runTriage(baseOptions(), cwd, baseDependencies(stub));
+
+		expect(exitCode).toBe(2);
+		const stderrText = stderr.mock.calls.map(([chunk]) => String(chunk)).join("");
+		// Not a silent skip: the diagnostic names the broken file before falling through.
+		expect(stderrText).toContain(agentsPath);
+		expect(stderrText).toContain("failed to parse");
+		expect(stderrText).toContain('no "agent:" block configured');
 	});
 });

@@ -4,6 +4,8 @@ import path from "node:path";
 
 import { parseDocument } from "yaml";
 
+import { AgentsFileParseError, AgentsFileReadError, loadAgentsFile, locateAgentsFile } from "../agent/agentsFile.js";
+import { detectAgentClis } from "../agent/detect.js";
 import {
 	ConfigDiscoveryError,
 	discoverConfig,
@@ -39,6 +41,8 @@ type DoctorProvider = Pick<GitHubProvider, "getBranchProtectionRequiredChecks">;
 export interface DoctorCapabilityResult {
 	warnings?: string[];
 	errors?: string[];
+	/** Purely informational notes (e.g. "you could run X") -- never affect exit code, printed with an `info:` prefix. */
+	infos?: string[];
 }
 
 /** M6 appends provider/model checks through this interface without changing M3 behavior. */
@@ -257,6 +261,10 @@ function warning(message: string): void {
 	process.stderr.write(`warning: ${message}\n`);
 }
 
+function info(message: string): void {
+	process.stdout.write(`info: ${message}\n`);
+}
+
 function failure(message: string): void {
 	process.stderr.write(`error: ${message}\n`);
 }
@@ -358,6 +366,90 @@ export function rolesPolicyCapabilityCheck(
 				warnings.push(...selection.warnings);
 			}
 			return { warnings, errors };
+		},
+	};
+}
+
+export interface AgentsCapabilityOptions {
+	/** Registry override for locating a sibling governance/agents.yaml -- mirrors --registry, resolved independently of the outer runDoctor call (see the module doc comment on why this check is self-contained). */
+	registryOverride?: string;
+	/** Injectable local-CLI detector (defaults to detectAgentClis). */
+	detect?: typeof detectAgentClis;
+	/** Injectable governance/agents.yaml loader (defaults to loadAgentsFile) -- tests use this to simulate a read failure (e.g. EACCES) without depending on real filesystem permission semantics. */
+	loadAgentsFile?: typeof loadAgentsFile;
+}
+
+/**
+ * Builds the agents capability check: cross-references a located
+ * `governance/agents.yaml` (src/agent/agentsFile.ts) against what's actually
+ * on this machine's PATH right now (src/agent/detect.ts) -- a CLI assigned
+ * to a role at `init-control` time that has since disappeared from PATH is a
+ * warning (fail-open: the file is a convenience fallback, not a merge gate,
+ * per src/agent/resolve.ts's three-tier chain). A registry with no
+ * `governance/agents.yaml` at all is only an info-level nudge to run
+ * `gatekeeper init-control` -- most repos never need one (tiers 1/2 of the
+ * BYO agent resolution chain cover them), so this must never be a warning.
+ *
+ * Registry resolution is self-contained (its own discoverConfig +
+ * resolveRegistryOption call) rather than threaded through from runDoctor's
+ * own resolution, mirroring rolesPolicyCapabilityCheck's independent
+ * resolveRolesPolicyPath call -- capability checks are composed as
+ * cwd-only closures in src/cli.ts, before runDoctor's own registry
+ * resolution has run.
+ */
+export function agentsCapabilityCheck(cwd: string, options: AgentsCapabilityOptions = {}): DoctorCapabilityCheck {
+	return {
+		name: "agents",
+		run: async (): Promise<DoctorCapabilityResult> => {
+			let discovered: Awaited<ReturnType<typeof discoverConfig>>;
+			try {
+				discovered = await discoverConfig(cwd);
+			} catch {
+				// A damaged .gatekeeper.yml is already surfaced fail-loud by runDoctor's own
+				// discoverConfig call -- this advisory check has nothing useful to add.
+				return {};
+			}
+			const registryPath = resolveRegistryOption({ cliValue: options.registryOverride, discovered });
+			if (!registryPath) {
+				return {};
+			}
+
+			const agentsPath = locateAgentsFile(registryPath);
+			if (!agentsPath) {
+				return {
+					infos: [
+						"no governance/agents.yaml found; run `gatekeeper init-control` to detect local agent CLIs and generate one",
+					],
+				};
+			}
+
+			let agentsFile: Awaited<ReturnType<typeof loadAgentsFile>>;
+			try {
+				agentsFile = await (options.loadAgentsFile ?? loadAgentsFile)(agentsPath);
+			} catch (error) {
+				// Same fail-loud-on-damage / fail-open-on-unreadable split as rolesPolicyCapabilityCheck:
+				// a file that exists but fails to parse is a real configuration defect (error, non-zero),
+				// while a read failure (missing/permissions/transient) degrades to a warning.
+				if (error instanceof AgentsFileParseError) {
+					return { errors: [`governance/agents.yaml (${agentsPath}) 解析失败: ${error.message}`] };
+				}
+				if (error instanceof AgentsFileReadError) {
+					return { warnings: [`无法读取 ${agentsPath}: ${error.reason}`] };
+				}
+				throw error;
+			}
+
+			const detected = await (options.detect ?? detectAgentClis)();
+			const detectedNames = new Set(detected.map((cli) => cli.name));
+			const warnings: string[] = [];
+			for (const assignment of agentsFile.assignments) {
+				if (!detectedNames.has(assignment.cli)) {
+					warnings.push(
+						`assigned CLI "${assignment.cli}" for role "${assignment.role}" (${agentsPath}) is no longer on PATH`,
+					);
+				}
+			}
+			return { warnings };
 		},
 	};
 }
@@ -469,6 +561,9 @@ export async function runDoctor(
 	for (const capability of dependencies.capabilityChecks ?? []) {
 		try {
 			const result = await capability.run();
+			for (const message of result.infos ?? []) {
+				info(`${capability.name}: ${message}`);
+			}
 			for (const message of result.warnings ?? []) {
 				warning(`${capability.name}: ${message}`);
 			}

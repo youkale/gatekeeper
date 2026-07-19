@@ -58,9 +58,16 @@ export interface DiscoveredConfig {
 
 const KNOWN_CONFIG_KEYS = new Set(["apiVersion", "registry", "repo", "base", "actor", "agent"]);
 
-/** Upper bound for `agent.timeout_seconds` -- generous enough for a slow drafting run, small enough to bound a runaway `--run` invocation. */
-const MAX_AGENT_TIMEOUT_SECONDS = 3600;
-const DEFAULT_AGENT_TIMEOUT_SECONDS = 600;
+/**
+ * Upper bound for `agent.timeout_seconds` -- generous enough for a slow
+ * drafting run, small enough to bound a runaway `--run` invocation. Also the
+ * shared cap for --run's tier-1 `--agent-command`/`--agent-timeout` and
+ * `GATEKEEPER_AGENT_TIMEOUT_SECONDS` overrides (see src/agent/resolve.ts) --
+ * exported so every timeout entry point enforces the exact same ceiling
+ * instead of each copying the literal 3600.
+ */
+export const MAX_AGENT_TIMEOUT_SECONDS = 3600;
+export const DEFAULT_AGENT_TIMEOUT_SECONDS = 600;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -269,15 +276,21 @@ export function missingRegistryMessage(command: string): string {
 
 /**
  * Shared "how do I configure --run's agent" hint for `triage --run`/`init
- * --run` when `.gatekeeper.yml` has no `agent:` block. There is deliberately
- * no default command -- `--run` only ever executes a coding-agent CLI the
- * user named themselves (see src/agent/runner.ts's trust-boundary note).
- * Both example lines are placeholders: adjust the flags to whatever your
- * local Codex/Grok (or any other) CLI actually accepts.
+ * --run` when none of src/agent/resolve.ts's three resolution tiers produced
+ * a command. There is deliberately no default command -- `--run` only ever
+ * executes a coding-agent CLI the user (or `init-control`'s detection pass)
+ * named (see src/agent/runner.ts's trust-boundary note). Both `.gatekeeper.yml`
+ * example lines are placeholders: adjust the flags to whatever your local
+ * Codex/Grok (or any other) CLI actually accepts.
  */
 export function missingAgentMessage(command: string): string {
 	return (
-		`gatekeeper ${command} --run: no "agent:" block configured in ${GATEKEEPER_CONFIG_FILENAME}; add one, e.g.:\n\n` +
+		`gatekeeper ${command} --run: no agent command could be resolved. Checked, in priority order:\n` +
+		"  1. --agent-command / GATEKEEPER_AGENT_COMMAND -- not given\n" +
+		`  2. no "agent:" block configured in ${GATEKEEPER_CONFIG_FILENAME}\n` +
+		"  3. no matching role assignment in a located governance/agents.yaml (run `gatekeeper init-control` " +
+		"to detect local agent CLIs and generate one)\n\n" +
+		`Add an "agent:" block to ${GATEKEEPER_CONFIG_FILENAME}, e.g.:\n\n` +
 		"agent:\n" +
 		'  command: "codex exec --full-auto < {brief} > {out}"   # adjust to your local Codex CLI\'s actual flags\n' +
 		"  timeout_seconds: 600\n\n" +

@@ -4,7 +4,9 @@ import path from "node:path";
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { rolesPolicyCapabilityCheck, runDoctor } from "../src/commands/doctor.js";
+import { AgentsFileReadError } from "../src/agent/agentsFile.js";
+import type { DetectedAgentCli } from "../src/agent/detect.js";
+import { agentsCapabilityCheck, rolesPolicyCapabilityCheck, runDoctor } from "../src/commands/doctor.js";
 
 describe("doctor fail direction and required checks", () => {
 	let registryDirectory: string;
@@ -570,5 +572,124 @@ tiers:
 		expect(result.warnings?.some((warning) => warning.includes("models.json 的显式确认仍生效"))).toBe(true);
 		expect(result.warnings?.some((warning) => warning.includes("model-level-unconfirmed"))).toBe(false);
 		expect(result.warnings?.some((warning) => warning.includes("no available model"))).toBe(false);
+	});
+});
+
+describe("agentsCapabilityCheck", () => {
+	let cwd: string;
+	let registryDir: string;
+
+	beforeEach(async () => {
+		cwd = await mkdtemp(path.join(tmpdir(), "gatekeeper-doctor-agents-cwd-"));
+		registryDir = await mkdtemp(path.join(tmpdir(), "gatekeeper-doctor-agents-registry-"));
+	});
+
+	afterEach(async () => {
+		await rm(cwd, { recursive: true, force: true });
+		await rm(registryDir, { recursive: true, force: true });
+	});
+
+	it("is silent when no registry is resolvable at all (no --registry override, no .gatekeeper.yml)", async () => {
+		const check = agentsCapabilityCheck(cwd);
+		const result = await check.run();
+
+		expect(result).toEqual({});
+	});
+
+	it("reports an info-level nudge (not a warning) when the registry has no governance/agents.yaml", async () => {
+		const check = agentsCapabilityCheck(cwd, { registryOverride: registryDir });
+		const result = await check.run();
+
+		expect(result.warnings ?? []).toEqual([]);
+		expect(result.errors ?? []).toEqual([]);
+		expect(result.infos?.some((message) => message.includes("gatekeeper init-control"))).toBe(true);
+	});
+
+	it("is silent (no warnings) when every assigned CLI is still detected on PATH", async () => {
+		await writeFile(
+			path.join(registryDir, "agents.yaml"),
+			[
+				"apiVersion: gatekeeper/v1",
+				"assignments:",
+				"  - role: deep-reasoner",
+				"    cli: codex",
+				"    vendor: openai",
+				'    command_template: "codex exec --full-auto < {brief} > {out}"',
+				"    rationale: test",
+				"detected: []",
+				"warnings: []",
+			].join("\n"),
+			"utf8",
+		);
+		const detected: DetectedAgentCli[] = [
+			{
+				name: "codex",
+				binary: "codex",
+				vendor: "openai",
+				tiers: ["deep-reasoner", "coder", "reviewer"],
+				commandTemplate: "codex exec --full-auto < {brief} > {out}",
+				path: "/usr/local/bin/codex",
+				version: "1.0.0",
+			},
+		];
+
+		const check = agentsCapabilityCheck(cwd, { registryOverride: registryDir, detect: async () => detected });
+		const result = await check.run();
+
+		expect(result.warnings ?? []).toEqual([]);
+		expect(result.infos ?? []).toEqual([]);
+	});
+
+	it("warns when an assigned CLI is no longer found on PATH", async () => {
+		await writeFile(
+			path.join(registryDir, "agents.yaml"),
+			[
+				"apiVersion: gatekeeper/v1",
+				"assignments:",
+				"  - role: deep-reasoner",
+				"    cli: codex",
+				"    vendor: openai",
+				'    command_template: "codex exec --full-auto < {brief} > {out}"',
+				"    rationale: test",
+				"detected: []",
+				"warnings: []",
+			].join("\n"),
+			"utf8",
+		);
+
+		const check = agentsCapabilityCheck(cwd, { registryOverride: registryDir, detect: async () => [] });
+		const result = await check.run();
+
+		expect(
+			result.warnings?.some((warning) => warning.includes('"codex"') && warning.includes("no longer on PATH")),
+		).toBe(true);
+	});
+
+	it("escalates to an error (not a crash, not a silent warning) when governance/agents.yaml exists but fails to parse", async () => {
+		await writeFile(path.join(registryDir, "agents.yaml"), "not: [valid, yaml", "utf8");
+
+		const check = agentsCapabilityCheck(cwd, { registryOverride: registryDir, detect: async () => [] });
+		const result = await check.run();
+
+		// Mirrors rolesPolicyCapabilityCheck's fail-loud-on-parse-damage posture: an
+		// agents.yaml that exists but is malformed is a real configuration defect, not
+		// routine "unreadable"/"not configured" (which stay warnings/infos).
+		expect(result.warnings ?? []).toEqual([]);
+		expect(result.errors?.some((message) => message.includes(path.join(registryDir, "agents.yaml")))).toBe(true);
+	});
+
+	it("degrades to a warning (not an error) when governance/agents.yaml exists but cannot be read", async () => {
+		await writeFile(path.join(registryDir, "agents.yaml"), "apiVersion: gatekeeper/v1\nassignments: []\n", "utf8");
+		const check = agentsCapabilityCheck(cwd, {
+			registryOverride: registryDir,
+			detect: async () => [],
+			loadAgentsFile: async () => {
+				throw new AgentsFileReadError(`failed to read ${path.join(registryDir, "agents.yaml")}: EACCES`);
+			},
+		});
+		const result = await check.run();
+
+		expect(result.errors ?? []).toEqual([]);
+		expect(result.warnings?.some((message) => message.includes("EACCES"))).toBe(true);
 	});
 });

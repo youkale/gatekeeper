@@ -7,7 +7,7 @@ import { Command, CommanderError, InvalidArgumentError, Option } from "commander
 import { runAdopt } from "./commands/adopt.js";
 import { runAudit } from "./commands/audit.js";
 import { runCheck } from "./commands/check.js";
-import { rolesPolicyCapabilityCheck, runDoctor } from "./commands/doctor.js";
+import { agentsCapabilityCheck, rolesPolicyCapabilityCheck, runDoctor } from "./commands/doctor.js";
 import { runGate } from "./commands/gate.js";
 import { registerInitCommand } from "./commands/init.js";
 import { runInitControl } from "./commands/init-control.js";
@@ -15,6 +15,7 @@ import { runProvision } from "./commands/provision.js";
 import { runStats } from "./commands/stats.js";
 import { runTriage } from "./commands/triage.js";
 import { runValidate } from "./commands/validate.js";
+import { MAX_AGENT_TIMEOUT_SECONDS } from "./config/discover.js";
 
 // Stream failures are infrastructure degradation. Warn on the other stream
 // when possible, then preserve whatever verdict exit code was already set.
@@ -47,6 +48,15 @@ function positiveInteger(value: string): number {
 	const parsed = Number(value);
 	if (!Number.isSafeInteger(parsed) || parsed <= 0) {
 		throw new InvalidArgumentError("must be a positive integer");
+	}
+	return parsed;
+}
+
+/** Bounded variant of positiveInteger for --agent-timeout: enforces the same MAX_AGENT_TIMEOUT_SECONDS ceiling as .gatekeeper.yml's agent.timeout_seconds and GATEKEEPER_AGENT_TIMEOUT_SECONDS (see src/agent/resolve.ts). */
+function agentTimeoutSeconds(value: string): number {
+	const parsed = positiveInteger(value);
+	if (parsed > MAX_AGENT_TIMEOUT_SECONDS) {
+		throw new InvalidArgumentError(`must be at most ${MAX_AGENT_TIMEOUT_SECONDS} seconds`);
 	}
 	return parsed;
 }
@@ -141,7 +151,12 @@ program
 	.option("--check-name <name>", "expected required check name (repeatable; bypasses workflow discovery)", collect, [])
 	.action(async (options) => {
 		const cwd = process.cwd();
-		process.exitCode = await runDoctor(options, cwd, { capabilityChecks: [rolesPolicyCapabilityCheck(cwd)] });
+		process.exitCode = await runDoctor(options, cwd, {
+			capabilityChecks: [
+				rolesPolicyCapabilityCheck(cwd),
+				agentsCapabilityCheck(cwd, { registryOverride: options.registry }),
+			],
+		});
 	});
 
 program
@@ -199,6 +214,15 @@ program
 	)
 	.option("--yes", "skip --run's interactive y/N confirmation (required when stdin is not a TTY)", false)
 	.option("--keep-artifacts", "keep --run's temporary brief/verdict files instead of deleting them on exit", false)
+	.option(
+		"--agent-command <cmd>",
+		"--run's tier-1 explicit agent command override (defaults to GATEKEEPER_AGENT_COMMAND, then .gatekeeper.yml's agent.command, then governance/agents.yaml's deep-reasoner assignment)",
+	)
+	.option(
+		"--agent-timeout <seconds>",
+		`wall-clock budget in seconds for --agent-command (max ${MAX_AGENT_TIMEOUT_SECONDS})`,
+		agentTimeoutSeconds,
+	)
 	.action(async (options) => {
 		process.exitCode = await runTriage(options, process.cwd());
 	});
@@ -217,6 +241,7 @@ program
 		"overwrite every existing template artifact, except repos.yaml (gatekeeper adopt's own roster, never touched once it exists)",
 		false,
 	)
+	.option("--no-detect", "skip local agent CLI detection and governance/agents.yaml generation")
 	.action(async (targetPath, options) => {
 		process.exitCode = await runInitControl({ ...options, path: targetPath }, process.cwd());
 	});

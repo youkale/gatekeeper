@@ -1,12 +1,14 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import type { Command } from "commander";
+import { type Command, InvalidArgumentError } from "commander";
 
+import { AgentTimeoutRangeError, resolveAgentCommand } from "../agent/resolve.js";
 import { AgentRunError, runAgentCommand } from "../agent/runner.js";
 import {
 	ConfigDiscoveryError,
 	discoverConfig,
+	MAX_AGENT_TIMEOUT_SECONDS,
 	missingAgentMessage,
 	resolveRegistryOption,
 } from "../config/discover.js";
@@ -18,8 +20,12 @@ import { runValidate } from "./validate.js";
 export interface InitOptions {
 	repos: string[];
 	out: string;
-	/** Run .gatekeeper.yml's configured agent against the brief to draft a registry, then validate --strict it. */
+	/** Run the resolved agent (see src/agent/resolve.ts's three-tier chain) against the brief to draft a registry, then validate --strict it. */
 	run?: boolean;
+	/** --run's tier-1 explicit agent command override (see src/agent/resolve.ts). */
+	agentCommand?: string;
+	/** Wall-clock budget in seconds for --agent-command; ignored unless agentCommand is also given. */
+	agentTimeout?: number;
 }
 
 /**
@@ -152,11 +158,32 @@ export async function runInit(options: InitOptions, cwd: string): Promise<number
 		return 0;
 	}
 
-	const agentConfig = discovered?.config.agent;
-	if (!agentConfig) {
+	// init has no --registry flag of its own; only env/config can supply a registry to locate a
+	// sibling governance/agents.yaml against (same as resolveRegistryDrafterCardPath above).
+	const registryPath = resolveRegistryOption({ discovered });
+	// registry-drafter is a coder-tier task (see roles-policy.yaml's tiers) -- tier 3 falls back
+	// to governance/agents.yaml's coder assignment, not deep-reasoner's.
+	let resolvedAgent: Awaited<ReturnType<typeof resolveAgentCommand>>;
+	try {
+		resolvedAgent = await resolveAgentCommand({
+			cliCommand: options.agentCommand,
+			cliTimeoutSeconds: options.agentTimeout,
+			discovered,
+			registryPath,
+			role: "coder",
+		});
+	} catch (error) {
+		if (!(error instanceof AgentTimeoutRangeError)) {
+			throw error;
+		}
+		process.stderr.write(`gatekeeper init --run: ${error.message}\n`);
+		return 2;
+	}
+	if (!resolvedAgent) {
 		process.stderr.write(`${missingAgentMessage("init")}\n`);
 		return 2;
 	}
+	process.stdout.write(`gatekeeper init --run: ${resolvedAgent.description}\n`);
 
 	const draftDir = path.join(outDir, "registry-draft");
 	const runBriefPath = path.join(outDir, "run-brief.md");
@@ -164,8 +191,8 @@ export async function runInit(options: InitOptions, cwd: string): Promise<number
 
 	try {
 		await runAgentCommand({
-			command: agentConfig.command,
-			timeoutSeconds: agentConfig.timeoutSeconds,
+			command: resolvedAgent.command,
+			timeoutSeconds: resolvedAgent.timeoutSeconds,
 			briefPath: runBriefPath,
 			outPath: draftDir,
 			cwd,
@@ -218,6 +245,23 @@ function collect(value: string, previous: string[]): string[] {
 	return [...previous, value];
 }
 
+function positiveInteger(value: string): number {
+	const parsed = Number(value);
+	if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+		throw new InvalidArgumentError("must be a positive integer");
+	}
+	return parsed;
+}
+
+/** Bounded variant of positiveInteger for --agent-timeout: enforces the same MAX_AGENT_TIMEOUT_SECONDS ceiling as .gatekeeper.yml's agent.timeout_seconds and GATEKEEPER_AGENT_TIMEOUT_SECONDS (see src/agent/resolve.ts). */
+function agentTimeoutSeconds(value: string): number {
+	const parsed = positiveInteger(value);
+	if (parsed > MAX_AGENT_TIMEOUT_SECONDS) {
+		throw new InvalidArgumentError(`must be at most ${MAX_AGENT_TIMEOUT_SECONDS} seconds`);
+	}
+	return parsed;
+}
+
 /**
  * Registers `gatekeeper init` on the given commander program. Not called from
  * src/cli.ts yet — wiring is owned by a separate task to avoid editing cli.ts
@@ -233,8 +277,17 @@ export function registerInitCommand(program: Command): void {
 		.requiredOption("--out <dir>", "output directory for scan.json and init-brief.md")
 		.option(
 			"--run",
-			"run .gatekeeper.yml's configured agent: command against the brief to draft a registry into <out>/registry-draft, then validate --strict it",
+			"run the resolved agent (see src/agent/resolve.ts's three-tier chain) against the brief to draft a registry into <out>/registry-draft, then validate --strict it",
 			false,
+		)
+		.option(
+			"--agent-command <cmd>",
+			"--run's tier-1 explicit agent command override (defaults to GATEKEEPER_AGENT_COMMAND, then .gatekeeper.yml's agent.command, then governance/agents.yaml's coder assignment)",
+		)
+		.option(
+			"--agent-timeout <seconds>",
+			`wall-clock budget in seconds for --agent-command (max ${MAX_AGENT_TIMEOUT_SECONDS})`,
+			agentTimeoutSeconds,
 		)
 		.action(async (options) => {
 			process.exitCode = await runInit(options, process.cwd());

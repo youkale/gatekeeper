@@ -1,9 +1,10 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { stringify } from "yaml";
 
 import { runInit } from "../src/commands/init.js";
 
@@ -52,6 +53,31 @@ async function writeAgentConfig(cwd: string, command: string): Promise<void> {
 		`apiVersion: gatekeeper/v1\nagent:\n  command: ${JSON.stringify(command)}\n  timeout_seconds: 30\n`,
 		"utf8",
 	);
+}
+
+/** Writes a `.gatekeeper.yml` with only a `registry:` field (no `agent:` block) -- so tiers 1/2 of the resolution chain are absent and only a sibling governance/agents.yaml (tier 3) can resolve an agent. */
+async function writeRegistryOnlyConfig(cwd: string, registryDir: string): Promise<void> {
+	await writeFile(path.join(cwd, ".gatekeeper.yml"), `apiVersion: gatekeeper/v1\nregistry: ${registryDir}\n`, "utf8");
+}
+
+/** Writes a governance/agents.yaml sibling of `registryDir` (candidate 1 in locateAgentsFile) with a single coder-tier assignment -- init --run's registry-drafter task is coder-tier, not deep-reasoner. */
+async function writeAgentsYaml(registryDir: string, coderCommand: string): Promise<void> {
+	const content = stringify({
+		apiVersion: "gatekeeper/v1",
+		assignments: [
+			{
+				role: "coder",
+				cli: "test-cli",
+				vendor: "test-vendor",
+				command_template: coderCommand,
+				rationale: "test fixture",
+			},
+		],
+		detected: [],
+		warnings: [],
+	});
+	await mkdir(registryDir, { recursive: true });
+	await writeFile(path.join(registryDir, "agents.yaml"), content, "utf8");
 }
 
 describe("init --run", () => {
@@ -143,5 +169,79 @@ describe("init --run", () => {
 		expect(exitCode).toBe(1);
 		expect(stderrText).toContain("agent command exited with code 1");
 		expect(stderrText).toContain("drafting agent crashed");
+	});
+
+	it("tier 3: falls back to governance/agents.yaml's coder assignment when no .gatekeeper.yml agent: block exists", async () => {
+		const registryDir = await mkdtemp(path.join(tmpdir(), "gatekeeper-init-run-tier3-registry-"));
+		try {
+			await writeAgentsYaml(registryDir, validDraftCommand());
+			await writeRegistryOnlyConfig(cwd, registryDir);
+			let stdoutText = "";
+			vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+				stdoutText += String(chunk);
+				return true;
+			});
+			vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+			const exitCode = await runInit({ repos: [repoARoot], out: outDir, run: true }, cwd);
+
+			expect(exitCode).toBe(0);
+			expect(stdoutText).toContain("using agent from governance/agents.yaml (coder: test-cli)");
+			expect(stdoutText).toContain("passed validate --strict");
+		} finally {
+			await rm(registryDir, { recursive: true, force: true });
+		}
+	});
+
+	it("tier 2 (.gatekeeper.yml agent.command) wins over tier 3 (governance/agents.yaml) when both are present", async () => {
+		const registryDir = await mkdtemp(path.join(tmpdir(), "gatekeeper-init-run-tier2-registry-"));
+		try {
+			await writeAgentsYaml(registryDir, nonZeroExitCommand()); // would fail loud if this were the one actually run
+			await writeFile(
+				path.join(cwd, ".gatekeeper.yml"),
+				`apiVersion: gatekeeper/v1\nregistry: ${registryDir}\nagent:\n  command: ${JSON.stringify(validDraftCommand())}\n  timeout_seconds: 30\n`,
+				"utf8",
+			);
+			let stdoutText = "";
+			vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+				stdoutText += String(chunk);
+				return true;
+			});
+			vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+			const exitCode = await runInit({ repos: [repoARoot], out: outDir, run: true }, cwd);
+
+			expect(exitCode).toBe(0);
+			expect(stdoutText).toContain("using agent from .gatekeeper.yml (agent.command)");
+		} finally {
+			await rm(registryDir, { recursive: true, force: true });
+		}
+	});
+
+	it("a governance/agents.yaml with no coder assignment falls through to the existing missingAgentMessage error", async () => {
+		const registryDir = await mkdtemp(path.join(tmpdir(), "gatekeeper-init-run-tier3-norole-registry-"));
+		try {
+			const content = stringify({
+				apiVersion: "gatekeeper/v1",
+				assignments: [{ role: "deep-reasoner", cli: "x", vendor: "y", command_template: "echo hi", rationale: "r" }],
+				detected: [],
+				warnings: [],
+			});
+			await writeFile(path.join(registryDir, "agents.yaml"), content, "utf8");
+			await writeRegistryOnlyConfig(cwd, registryDir);
+			let stderrText = "";
+			vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+			vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+				stderrText += String(chunk);
+				return true;
+			});
+
+			const exitCode = await runInit({ repos: [repoARoot], out: outDir, run: true }, cwd);
+
+			expect(exitCode).toBe(2);
+			expect(stderrText).toContain('no "agent:" block configured');
+		} finally {
+			await rm(registryDir, { recursive: true, force: true });
+		}
 	});
 });

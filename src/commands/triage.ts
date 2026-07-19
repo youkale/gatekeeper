@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
 
+import { AgentTimeoutRangeError, resolveAgentCommand } from "../agent/resolve.js";
 import { AgentRunError, type AgentRunResult, runAgentCommand } from "../agent/runner.js";
 import {
 	ConfigDiscoveryError,
@@ -61,12 +62,16 @@ export interface TriageOptions {
 	post?: boolean;
 	verdictFile?: string;
 	actor?: string;
-	/** Generate the briefing, run .gatekeeper.yml's configured agent against it, then confirm before posting. Mutually exclusive with --verdict-file/--post. */
+	/** Generate the briefing, run the resolved agent against it (see src/agent/resolve.ts's three-tier chain), then confirm before posting. Mutually exclusive with --verdict-file/--post. */
 	run?: boolean;
 	/** Skip --run's interactive y/N confirmation. Required outside a TTY. */
 	yes?: boolean;
 	/** Keep --run's temporary brief/verdict files instead of deleting them on exit (any exit path). */
 	keepArtifacts?: boolean;
+	/** --run's tier-1 explicit agent command override (see src/agent/resolve.ts). */
+	agentCommand?: string;
+	/** Wall-clock budget in seconds for --agent-command; ignored unless agentCommand is also given. */
+	agentTimeout?: number;
 }
 
 type TriageProvider = Pick<GitHubProvider, "getIssue" | "createIssueComment" | "addIssueLabels" | "removeIssueLabel">;
@@ -613,12 +618,14 @@ async function defaultPromptConfirm(message: string): Promise<boolean> {
 
 /**
  * `triage --run`: generates the same briefing runTriageBrief would print,
- * hands it to the `.gatekeeper.yml`-configured agent, subjects whatever
- * verdict file the agent produces to the exact same hard validation
- * (parseVerdictFile + suggested_level + validateDispatchAgainstRolesPolicy)
- * --post applies to a hand-authored one, prints a summary, and -- after an
- * explicit confirmation -- replays it through runTriagePost so posting logic
- * is never duplicated.
+ * hands it to the agent resolved through src/agent/resolve.ts's three-tier
+ * chain (--agent-command/GATEKEEPER_AGENT_COMMAND, then .gatekeeper.yml's
+ * agent.command, then governance/agents.yaml's deep-reasoner assignment),
+ * subjects whatever verdict file the agent produces to the exact same hard
+ * validation (parseVerdictFile + suggested_level +
+ * validateDispatchAgainstRolesPolicy) --post applies to a hand-authored one,
+ * prints a summary, and -- after an explicit confirmation -- replays it
+ * through runTriagePost so posting logic is never duplicated.
  */
 async function runTriageRun(
 	options: ResolvedTriageOptions,
@@ -629,11 +636,28 @@ async function runTriageRun(
 	dependencies: TriageDependencies,
 	discovered: DiscoveredConfig | null,
 ): Promise<number> {
-	const agentConfig = discovered?.config.agent;
-	if (!agentConfig) {
+	let resolvedAgent: Awaited<ReturnType<typeof resolveAgentCommand>>;
+	try {
+		resolvedAgent = await resolveAgentCommand({
+			cliCommand: options.agentCommand,
+			cliTimeoutSeconds: options.agentTimeout,
+			env: dependencies.env,
+			discovered,
+			registryPath: options.registry,
+			role: "deep-reasoner",
+		});
+	} catch (error) {
+		if (!(error instanceof AgentTimeoutRangeError)) {
+			throw error;
+		}
+		process.stderr.write(`gatekeeper triage --run: ${error.message}\n`);
+		return 2;
+	}
+	if (!resolvedAgent) {
 		process.stderr.write(`${missingAgentMessage("triage")}\n`);
 		return 2;
 	}
+	process.stdout.write(`gatekeeper triage --run: ${resolvedAgent.description}\n`);
 
 	const briefing = await buildTriageBriefing(options, cwd, key, registry, provider, dependencies);
 
@@ -646,8 +670,8 @@ async function runTriageRun(
 		let runResult: AgentRunResult;
 		try {
 			runResult = await (dependencies.runAgent ?? runAgentCommand)({
-				command: agentConfig.command,
-				timeoutSeconds: agentConfig.timeoutSeconds,
+				command: resolvedAgent.command,
+				timeoutSeconds: resolvedAgent.timeoutSeconds,
 				briefPath,
 				outPath: verdictPath,
 				cwd,

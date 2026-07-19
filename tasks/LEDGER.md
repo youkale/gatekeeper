@@ -32,7 +32,9 @@
 
 | T-20260719-06 | 角色包 | code-reviewer 角色卡蒸馏（实战方法论产品化，第五卡；判例自指验证首例） | sonnet-coder | R1: grok PASS(3nb) + claude FAIL(评论嵌本机绝对路径——正中卡内判例#1)；R2: claude PASS（偏离裁定接受+隔离副本 mutation 实证） | ✅ 验收提交 | records/T-20260719-06-code-reviewer-card.md |
 
-| T-20260719-07 | 角色包 | init-control 环境 CLI 探测与角色自动选配（→ governance/agents.yaml → BYO runner 解析链） | sonnet-coder | DISPATCH | 进行中 | - |
+| T-20260719-07 | 角色包 | CLI 探测与角色自动选配（detect/assign/agents.yaml/三级解析链/doctor 健康检查） | sonnet-coder | R1: codex FAIL(4，含进程组复发)+claude FAIL(2)+grok PASS(采2)；R2: codex FAIL(2，含自我反转经仲裁安全优先裁定)+claude PASS；R3: codex 三项确认+新条经复核为沙箱误判驳回（3 轮） | ✅ 验收提交 | records/T-20260719-07-cli-detection.md |
+
+- [T-07 低优] tests/agent-detect.test.ts 相对段用例的 chdir-free 硬化（codex 处方：path.relative 构造，免疫未来 pool 切换；当前默认 forks 池下 511 全绿，非缺陷）
 
 ### 遗留债队列（活动，v1.1 候选）
 
