@@ -42,7 +42,13 @@ describe("packagedRoleCardDirectory", () => {
 
 describe("packagedRoleCardPath", () => {
 	it("resolves every shipped role card to a real, existing file", async () => {
-		expect(ROLE_CARD_NAMES).toEqual(["deep-reasoner", "registry-drafter", "contract-scout", "registry-reviewer"]);
+		expect(ROLE_CARD_NAMES).toEqual([
+			"deep-reasoner",
+			"registry-drafter",
+			"contract-scout",
+			"registry-reviewer",
+			"code-reviewer",
+		]);
 		for (const card of ROLE_CARD_NAMES) {
 			const cardPath = packagedRoleCardPath(card);
 			expect(cardPath).toBe(path.join(packageRoot, "docs", "roles", `${card}.md`));
@@ -65,6 +71,22 @@ describe("resolveRoleCardPath", () => {
 
 		const resolved = resolveRoleCardPath("deep-reasoner", registryDir);
 		expect(resolved).toBe(packagedRoleCardPath("deep-reasoner"));
+	});
+
+	it("resolves the code-reviewer card the same way as the other four: packaged fallback, then control repo override", async () => {
+		const resolvedPackaged = resolveRoleCardPath("code-reviewer");
+		expect(resolvedPackaged).toBe(packagedRoleCardPath("code-reviewer"));
+
+		const base = await makeTmpDir("gatekeeper-role-cards-code-reviewer-");
+		const registryDir = path.join(base, "governance", "registry");
+		const rolesDir = path.join(base, "governance", "roles");
+		await mkdir(registryDir, { recursive: true });
+		await mkdir(rolesDir, { recursive: true });
+		const customPath = path.join(rolesDir, "code-reviewer.md");
+		await writeFile(customPath, "# customized code-reviewer card\n", "utf8");
+
+		const resolvedCustom = resolveRoleCardPath("code-reviewer", registryDir);
+		expect(resolvedCustom).toBe(customPath);
 	});
 
 	it("prefers the control repo's own governance/roles/<card>.md over the packaged copy", async () => {

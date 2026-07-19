@@ -102,6 +102,7 @@ export interface TriageIssueInput {
 }
 
 const DEFAULT_DEEP_REASONER_CARD_PATH = "docs/roles/deep-reasoner.md";
+const DEFAULT_CODE_REVIEWER_CARD_PATH = "docs/roles/code-reviewer.md";
 
 export interface TriageBriefingInput {
 	key: string;
@@ -352,13 +353,33 @@ function decisionHeading(decision: TriageDecision): string {
 	}
 }
 
-/** Render the structured issue comment posted by `--post`. Pure -- no I/O. */
+/**
+ * Render the structured issue comment posted by `--post`. Pure -- no I/O.
+ *
+ * `codeReviewerCardPath` is a *portable* representation of the code-reviewer
+ * role card location -- the packaged copy's fixed, checkout-relative literal
+ * (`docs/roles/code-reviewer.md`), or a control repo override expressed
+ * relative to the registry directory -- never a filesystem-absolute path.
+ * Unlike `renderTriageBriefing`'s `deepReasonerCardPath` (printed to stdout
+ * for same-machine, same-checkout consumption, where a resolved absolute
+ * path is fine), this value is embedded in a GitHub issue comment: a durable
+ * artifact that may be read from a different machine or CI runner than the
+ * one `triage` ran on, so an absolute local path would leak host directory
+ * structure and be meaningless to that reader. The caller is responsible for
+ * both resolving (via `src/roles/cards.ts`'s `resolveRoleCardPath`) and
+ * converting to this portable form -- see `resolveCodeReviewerCardPath` in
+ * `src/commands/triage.ts` for that conversion. This module never does its
+ * own filesystem resolution. Defaults to the packaged path's literal
+ * repo-relative spelling so existing callers are unaffected.
+ */
 export function renderTriageComment(
 	key: string,
 	verdict: TriageVerdict,
 	ledger: TriageLedgerEntry,
 	actor?: string,
+	codeReviewerCardPath?: string,
 ): string {
+	const reviewerCardPath = codeReviewerCardPath ?? DEFAULT_CODE_REVIEWER_CARD_PATH;
 	const lines: string[] = [
 		TRIAGE_COMMENT_MARKER,
 		"",
@@ -384,7 +405,8 @@ export function renderTriageComment(
 		"### 派工方案",
 		"",
 		`- coder: \`${verdict.dispatch.coder}\``,
-		`- reviewers: ${verdict.dispatch.reviewers.map((reviewer) => `\`${reviewer}\``).join(", ")}`,
+		`- reviewers: ${verdict.dispatch.reviewers.map((reviewer) => `\`${reviewer}\``).join(", ")}` +
+			`（按 \`${reviewerCardPath}\` 角色卡执行 review）`,
 	);
 
 	const ledgerJson = JSON.stringify(ledger, null, 2).replaceAll("`", "\\u0060");

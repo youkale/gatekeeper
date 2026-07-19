@@ -30,6 +30,10 @@
 
 | T-20260719-05 | 易用性 | init-control：总控一键初始化（骨架+角色卡物化+roles-policy 副本，控制仓副本优先回落包内） | sonnet-coder | R1: claude FAIL(--force 清空 repos.yaml 数据丢失，活体) + grok PASS(6nb 采 4，含 basename 误判边界)；R2: claude PASS（逐字节存活+decoy 反证） | ✅ 验收提交 | records/T-20260719-05-init-control.md |
 
+| T-20260719-06 | 角色包 | code-reviewer 角色卡蒸馏（实战方法论产品化，第五卡；判例自指验证首例） | sonnet-coder | R1: grok PASS(3nb) + claude FAIL(评论嵌本机绝对路径——正中卡内判例#1)；R2: claude PASS（偏离裁定接受+隔离副本 mutation 实证） | ✅ 验收提交 | records/T-20260719-06-code-reviewer-card.md |
+
+| T-20260719-07 | 角色包 | init-control 环境 CLI 探测与角色自动选配（→ governance/agents.yaml → BYO runner 解析链） | sonnet-coder | DISPATCH | 进行中 | - |
+
 ### 遗留债队列（活动，v1.1 候选）
 
 - [v1.1] enforce: hard 的真实前置：受信外部通道（GitHub App/webhook → repository_dispatch 触发默认分支 workflow）——workflow_run 桥接已实现但可被 PR 压制脉冲，仅 best-effort（T-11 裁决结论）

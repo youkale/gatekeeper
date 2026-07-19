@@ -4,8 +4,8 @@ import { fileURLToPath } from "node:url";
 
 /**
  * Role card resolution: which copy of a Gatekeeper role card (deep-reasoner,
- * registry-drafter, contract-scout, registry-reviewer) a command should hand
- * to an agent. Three candidates, in priority order:
+ * registry-drafter, contract-scout, registry-reviewer, code-reviewer) a
+ * command should hand to an agent. Three candidates, in priority order:
  *
  *  1. A control repo's own customized copy at `<registry>/roles/<name>.md`
  *     -- the registry sits directly at the control repo root (see
@@ -31,7 +31,13 @@ import { fileURLToPath } from "node:url";
  * is read here (callers that need the text do their own `readFile`).
  */
 
-export const ROLE_CARD_NAMES = ["deep-reasoner", "registry-drafter", "contract-scout", "registry-reviewer"] as const;
+export const ROLE_CARD_NAMES = [
+	"deep-reasoner",
+	"registry-drafter",
+	"contract-scout",
+	"registry-reviewer",
+	"code-reviewer",
+] as const;
 export type RoleCardName = (typeof ROLE_CARD_NAMES)[number];
 
 export class RoleCardNotFoundError extends Error {

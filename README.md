@@ -33,7 +33,7 @@ Create a registry with one `policy.yaml` and one YAML file per contract under `c
 
 ### 1. Initialize a control repo, once
 
-`gatekeeper init-control <path>` scaffolds a brand-new control/hub checkout — the directory `gatekeeper adopt --control` locates a registry inside — in one command: `governance/registry/policy.yaml` (a minimal, working two-level policy), `governance/registry/contracts/` (empty, plus an annotated `_example.yaml.txt` template), `governance/registry/repos.yaml` (empty roster), `governance/roles/*.md` (your organization's own customizable copy of the four role cards), and a root `roles-policy.yaml` copy. It then runs `gatekeeper validate` against the generated registry and prints the result.
+`gatekeeper init-control <path>` scaffolds a brand-new control/hub checkout — the directory `gatekeeper adopt --control` locates a registry inside — in one command: `governance/registry/policy.yaml` (a minimal, working two-level policy), `governance/registry/contracts/` (empty, plus an annotated `_example.yaml.txt` template), `governance/registry/repos.yaml` (empty roster), `governance/roles/*.md` (your organization's own customizable copy of the five role cards), and a root `roles-policy.yaml` copy. It then runs `gatekeeper validate` against the generated registry and prints the result.
 
 ```bash
 gatekeeper init-control /work/governance-hub
@@ -44,7 +44,7 @@ Every artifact is written idempotently: an existing file is left untouched and r
 #### Control repo customization points
 
 - `governance/registry/policy.yaml`: add/rename `levels`, tune `enforcement` (`block` | `warn`) and `require` (an m-of-n lane count) per level, or add a top-level `lanes:` block to override/extend the packaged `lanes.d/*.yaml` presets.
-- `governance/roles/*.md`: this control repo's own copy of the four role cards (`deep-reasoner`, `registry-drafter`, `contract-scout`, `registry-reviewer`). `gatekeeper triage`/`gatekeeper init` briefings prefer this copy over the packaged `docs/roles/` default whenever the repo they're run against is adopted into this registry (see [Role cards](#role-cards-vendor-neutral) below) — edit these to tailor a role's instructions to your organization without forking the package.
+- `governance/roles/*.md`: this control repo's own copy of the five role cards (`deep-reasoner`, `registry-drafter`, `contract-scout`, `registry-reviewer`, `code-reviewer`). `gatekeeper triage`/`gatekeeper init` briefings prefer this copy over the packaged `docs/roles/` default whenever the repo they're run against is adopted into this registry (see [Role cards](#role-cards-vendor-neutral) below) — edit these to tailor a role's instructions to your organization without forking the package.
 - `roles-policy.yaml` (control repo root): this control repo's own model-tier preferences (`tiers.<role>.prefer`/`count`/`cross_vendor`). Running `gatekeeper doctor`/`gatekeeper triage` from the control repo root reads this copy before falling back to the packaged default (see [Role cards](#role-cards-vendor-neutral) below).
 - `governance/registry/repos.yaml`: **not** a customization point — it is `gatekeeper adopt`'s own roster and `--force` never touches it once it exists (see above).
 
@@ -306,10 +306,13 @@ Gatekeeper's product core makes zero model calls (see "Govern structure, not cap
 - `registry-drafter`: turn grounded facts into `contracts/*.yaml`.
 - `registry-reviewer`: review registry drafts against the public specification.
 - `deep-reasoner`: make the issue requirement-gate judgment and dispatch plan.
+- `code-reviewer`: independent, read-only, adversarial review of a coding task's diff itself (not a registry draft) — the general-purpose reviewer role `triage`'s dispatch plan and the double/M-of-N review posture assume.
 
 Each file is plain markdown you can hand to Claude Code, Codex, Cursor, pi, or any other coding agent as a subagent/system-prompt definition. `gatekeeper init` and `gatekeeper triage` print next-step guidance pointing at these files instead of assuming a specific agent runtime.
 
-`gatekeeper init-control` writes an adopted control repo its own customizable copy of all four cards at `governance/roles/*.md` (see [Control repo customization points](#control-repo-customization-points) above). When a repo is adopted into a registry that has one, `init`/`triage` briefings point at that copy instead of the packaged `docs/roles/` default (src/roles/cards.ts's `resolveRoleCardPath`); otherwise they fall back to the packaged copy unchanged.
+`gatekeeper init-control` writes an adopted control repo its own customizable copy of all five cards at `governance/roles/*.md` (see [Control repo customization points](#control-repo-customization-points) above). When a repo is adopted into a registry that has one, `init`/`triage` briefings point at that copy instead of the packaged `docs/roles/` default (src/roles/cards.ts's `resolveRoleCardPath`); otherwise they fall back to the packaged copy unchanged.
+
+`code-reviewer` is the review-flow counterpart to `deep-reasoner`'s dispatch plan: a `gatekeeper triage --post`ed comment's "reviewers" line names the `code-reviewer` card path (also resolved through `resolveRoleCardPath`) each dispatched reviewer should follow, and its `VERDICT: PASS | FAIL` output is exactly the evidence a `policy.yaml` lane of type `review` or `comment-scan` is designed to collect on the resulting PR — see [`docs/roles/code-reviewer.md`](docs/roles/code-reviewer.md) for the full adversarial checklist and output contract.
 
 The repo-root `roles-policy.yaml` defines data-only model tiers consumed by these roles:
 

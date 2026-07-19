@@ -29,7 +29,7 @@ import {
 	type TriageIssueInput,
 	type TriageVerdict,
 } from "../render/triage.js";
-import { resolveRoleCardPath } from "../roles/cards.js";
+import { packagedRoleCardPath, resolveRoleCardPath } from "../roles/cards.js";
 import type { TierModelSelection } from "../roles/policy.js";
 import {
 	loadRolesPolicy,
@@ -315,6 +315,69 @@ function resolveDeepReasonerCardPath(registryPath: string): string {
 	}
 }
 
+const PACKAGED_CODE_REVIEWER_CARD_PATH = "docs/roles/code-reviewer.md";
+
+/**
+ * Resolve the code-reviewer role card path the posted comment's dispatch-plan
+ * "reviewers" line points at.
+ *
+ * Unlike resolveDeepReasonerCardPath -- whose result only ever gets printed
+ * to stdout for whoever is running `gatekeeper triage` right now, on the same
+ * machine and the same checkout -- this value gets embedded in a GitHub issue
+ * comment: a durable artifact that may be read from a different machine, a
+ * different checkout, or a CI runner entirely. resolveRoleCardPath's raw
+ * return value is filesystem-resolved (an absolute path, or a path rooted at
+ * whatever `moduleUrl`/`registryPath` happened to be on *this* machine), so
+ * embedding it directly would leak local directory structure and be useless
+ * (or actively misleading) to a reader elsewhere -- this function therefore
+ * returns a *portable representation* for persisted output, not the
+ * filesystem-resolved path itself: resolveRoleCardPath is still used
+ * internally to determine existence and source (packaged vs. control-repo
+ * override), but only the source classification survives into the returned
+ * string.
+ *
+ * - Packaged default matched: return the fixed, checkout-relative literal
+ *   `docs/roles/code-reviewer.md` (true for any install, never a local path).
+ * - A control repo's own customized copy matched: return it relative to
+ *   `registryPath` (the same `--registry` directory every reader of a
+ *   dispatch-plan comment must already have located to act on it), e.g.
+ *   `roles/code-reviewer.md` or `../roles/code-reviewer.md` depending on
+ *   which of the two customization layouts matched. This deliberately does
+ *   *not* attempt to re-derive and express the path relative to a guessed
+ *   "control repo root": src/roles/cards.ts's own module doc comment records
+ *   that a control repo's `roles/` can sit at either of two different depths
+ *   relative to `registryPath` (`<registryPath>/roles` when the registry
+ *   directory *is* the control root, or `<registryPath>/../roles` when they
+ *   are `governance/` siblings) with no reliable way to tell which one
+ *   matched from `registryPath` alone -- that is precisely the
+ *   basename/depth-heuristic misclassification class `resolveRoleCardPath`
+ *   was hardened against (see its module doc comment). Reusing that same
+ *   precedent here (registry-relative, not a re-guessed control-root-relative
+ *   path) is deliberate: a plausible-looking shortcut that reintroduces an
+ *   already-fixed heuristic in a new call site is exactly the "precedent
+ *   reuse without re-verifying its safety in the new context" failure class
+ *   documented in docs/roles/code-reviewer.md's precedent-judgments section.
+ *
+ * Same degrade-to-warning-and-packaged-fallback posture as
+ * resolveDeepReasonerCardPath: the packaged copy always ships with the
+ * package, so a lookup failure here is an installation anomaly, not a reason
+ * to fail the whole --post write.
+ */
+function resolveCodeReviewerCardPath(registryPath: string): string {
+	try {
+		const resolved = resolveRoleCardPath("code-reviewer", registryPath);
+		if (resolved === packagedRoleCardPath("code-reviewer")) {
+			return PACKAGED_CODE_REVIEWER_CARD_PATH;
+		}
+		return path.relative(registryPath, resolved).split(path.sep).join("/");
+	} catch (error) {
+		process.stderr.write(
+			`warning: 无法定位 code-reviewer 角色卡: ${error instanceof Error ? error.message : String(error)}\n`,
+		);
+		return PACKAGED_CODE_REVIEWER_CARD_PATH;
+	}
+}
+
 /**
  * Assembles the triage briefing markdown (contract summary + heuristic
  * consumer-impact graph + roles-policy dispatch candidates). Shared by the
@@ -512,7 +575,8 @@ async function runTriagePost(
 		return 1;
 	}
 
-	const commentBody = renderTriageComment(key, verdict, ledgerEntry, options.actor);
+	const codeReviewerCardPath = resolveCodeReviewerCardPath(options.registry);
+	const commentBody = renderTriageComment(key, verdict, ledgerEntry, options.actor, codeReviewerCardPath);
 	let githubSyncIncomplete = false;
 	try {
 		await provider.createIssueComment(options.issue, commentBody);

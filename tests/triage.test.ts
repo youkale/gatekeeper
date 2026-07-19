@@ -206,6 +206,21 @@ describe("buildTriageLedgerEntry / renderTriageComment", () => {
 		expect(comment).toContain("```json gatekeeper-triage-ledger");
 		expect(comment).toContain('"kind": "triage"');
 		expect(comment).not.toContain("```json gatekeeper-ledger\n");
+		// reviewers line points at the packaged code-reviewer card path by default (no explicit override given).
+		expect(comment).toContain("按 `docs/roles/code-reviewer.md` 角色卡执行 review");
+	});
+
+	it("points the reviewers line at an explicitly resolved code-reviewer card path when one is given", () => {
+		const entry = buildTriageLedgerEntry("acme/checkout-service#42", verdict, "2026-07-18T12:00:00Z");
+		const comment = renderTriageComment(
+			"acme/checkout-service#42",
+			verdict,
+			entry,
+			"octocat",
+			"governance/roles/code-reviewer.md",
+		);
+		expect(comment).toContain("按 `governance/roles/code-reviewer.md` 角色卡执行 review");
+		expect(comment).not.toContain("docs/roles/code-reviewer.md");
 	});
 });
 
@@ -457,6 +472,12 @@ tiers:
 			expect(issueNumber).toBe(42);
 			expect(String(body)).toContain("处理人: `gatekeeper-bot`");
 			expect(stub.addIssueLabels).toHaveBeenCalledWith(42, ["gatekeeper:accepted"]);
+			// reviewers line points at the packaged code-reviewer card by its portable,
+			// checkout-relative literal -- no filesystem-absolute path (registryDir/cwd) leaked
+			// into a comment that may be read from a different machine or CI runner.
+			expect(String(body)).toContain("按 `docs/roles/code-reviewer.md` 角色卡执行 review");
+			expect(String(body)).not.toContain(registryDir);
+			expect(String(body)).not.toContain(cwd);
 
 			const ledgerPath = path.join(cwd, ".gatekeeper", "triage-ledger.jsonl");
 			const ledgerContent = await readFile(ledgerPath, "utf8");
@@ -474,6 +495,24 @@ tiers:
 			});
 			const output = stdout.mock.calls.map(([chunk]) => String(chunk)).join("");
 			expect(output).toContain("recorded accepted for acme/checkout-service#42");
+		});
+
+		it("points the posted comment's reviewers line at a control repo's own code-reviewer card, expressed relative to --registry, never as a filesystem-absolute path", async () => {
+			const stub = providerStub();
+			await mkdir(path.join(registryDir, "roles"), { recursive: true });
+			await writeFile(path.join(registryDir, "roles", "code-reviewer.md"), "# customized code-reviewer card\n", "utf8");
+			const verdictFile = await writeVerdictFile(verdictPayload);
+			vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+			const exitCode = await runTriage(baseOptions({ post: true, verdictFile }), cwd, baseDependencies(stub));
+
+			expect(exitCode).toBe(0);
+			const [, body] = stub.createIssueComment.mock.calls[0] ?? [];
+			expect(String(body)).toContain("按 `roles/code-reviewer.md` 角色卡执行 review");
+			// No absolute filesystem path anywhere in the posted comment -- registryDir/cwd are
+			// both mkdtemp absolute paths, neither of which may leak into persisted, cross-machine output.
+			expect(String(body)).not.toContain(registryDir);
+			expect(String(body)).not.toContain(cwd);
 		});
 
 		it("maps rejected/needs-info decisions to their labels", async () => {

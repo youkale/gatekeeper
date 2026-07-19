@@ -130,11 +130,11 @@ describe("gatekeeper init-control: full skeleton generation", () => {
 		expect(parsed.repos).toEqual([]);
 	});
 
-	it("writes all four role cards with a control-repo customization header", async () => {
+	it("writes all five role cards with a control-repo customization header", async () => {
 		const base = await makeTmpDir("gatekeeper-init-control-roles-");
 		await runInitControl({ path: "control" }, base);
 
-		expect(ROLE_CARD_NAMES).toHaveLength(4);
+		expect(ROLE_CARD_NAMES).toHaveLength(5);
 		for (const card of ROLE_CARD_NAMES) {
 			const content = await readFile(path.join(base, "control", "governance", "roles", `${card}.md`), "utf8");
 			expect(content).toContain("init-control");
