@@ -249,19 +249,17 @@ program
 program
 	.command("adopt")
 	.description(
-		"Register a repository with the contract registry located inside a control/hub checkout: write " +
-			".gatekeeper.yml at the target repo's root and upsert its entry into <registry>/repos.yaml.",
+		"Register a repository with the contract registry located inside a control/hub checkout. Zero-touch: " +
+			"nothing is written into the target repo -- upserts its entry into <registry>/repos.yaml and this " +
+			"machine's user-level controls index (~/.config/gatekeeper/controls.yaml), so every other command's " +
+			"zero-flag config discovery can find it from inside the repo without any file living there.",
 	)
 	.argument("[path]", "target repo to adopt (defaults to the current directory)")
 	.requiredOption(
 		"--control <path>",
 		"control/hub repo path; the registry is located inside it (governance/registry, then registry, then the control repo itself)",
 	)
-	.option(
-		"--repo <org/name>",
-		"explicit repo identity (defaults to the origin remote); overrides .gatekeeper.yml's repo:",
-	)
-	.option("--force", "overwrite an existing .gatekeeper.yml", false)
+	.option("--repo <org/name>", "explicit repo identity (defaults to the origin remote)")
 	.action(async (targetPath, options) => {
 		process.exitCode = await runAdopt({ ...options, path: targetPath }, process.cwd());
 	});

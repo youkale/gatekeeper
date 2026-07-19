@@ -1,10 +1,13 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { runTriage, type TriageDependencies, type TriageOptions } from "../src/commands/triage.js";
+import { upsertControl } from "../src/config/controls.js";
+import { saveRepos } from "../src/config/repos.js";
 import { parseRegistry } from "../src/engine/registry.js";
 import { InfraError } from "../src/providers/github.js";
 import {
@@ -782,5 +785,59 @@ tiers:
 			expect(stub.addIssueLabels).not.toHaveBeenCalled();
 			expect(stderr.mock.calls.map(([chunk]) => String(chunk)).join("")).toContain("无法清理旧标签");
 		});
+	});
+});
+
+function git(cwd: string, args: string[]): string {
+	return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
+}
+
+describe("runTriage: --repo falls back to the origin remote after a self-match discovery (B6)", () => {
+	it("resolves --repo via git remote origin with zero --repo, inside a hub's own root (self-match, no repos.yaml entry)", async () => {
+		const base = await mkdtemp(path.join(tmpdir(), "gatekeeper-triage-selfmatch-"));
+		try {
+			const hubRoot = path.join(base, "hub");
+			await mkdir(hubRoot, { recursive: true });
+			git(hubRoot, ["init", "-q"]);
+			git(hubRoot, ["symbolic-ref", "HEAD", "refs/heads/main"]);
+			git(hubRoot, ["remote", "add", "origin", "git@github.com:acme/checkout-service.git"]);
+
+			const registryDir = path.join(hubRoot, "governance", "registry");
+			await mkdir(path.join(registryDir, "contracts"), { recursive: true });
+			await writeFile(path.join(registryDir, "policy.yaml"), POLICY_YAML, "utf8");
+			await writeFile(path.join(registryDir, "contracts", "api.yaml"), CONTRACT_YAML, "utf8");
+			await saveRepos(registryDir, []); // a control repo never adopts itself
+
+			const configDir = path.join(base, "config");
+			const env = { GATEKEEPER_CONFIG_DIR: configDir };
+			await upsertControl(
+				{
+					control: await realpath(hubRoot),
+					registry: await realpath(registryDir),
+					registered_at: "2026-07-20T00:00:00.000Z",
+				},
+				env,
+			);
+
+			const stub = providerStub();
+			const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+			// No --registry, no --repo -- both must resolve entirely through the
+			// self-match branch of locateOwningControl (src/config/controls.ts,
+			// registry only, no repo identity) plus resolveRepo's origin-remote
+			// auto-detection, the same fallback check.ts/gate.ts/doctor.ts already
+			// apply.
+			const exitCode = await runTriage({ issue: 42 }, hubRoot, {
+				createProvider: () => stub,
+				piConfigDir: path.join(base, "no-such-pi-config"),
+				env,
+			});
+
+			expect(exitCode).toBe(0);
+			const output = stdout.mock.calls.map(([chunk]) => String(chunk)).join("");
+			expect(output).toContain("# Gatekeeper Triage 简报: acme/checkout-service#42");
+		} finally {
+			await rm(base, { recursive: true, force: true });
+		}
 	});
 });

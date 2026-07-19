@@ -1,5 +1,5 @@
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,8 +23,12 @@ interface StreamErrorRunResult extends RunResult {
 	warningLog: string;
 }
 
-function runCli(cwd: string, args: string[]): RunResult {
-	const result = spawnSync(process.execPath, ["--import", tsxLoader, cliPath, ...args], { cwd, encoding: "utf8" });
+function runCli(cwd: string, args: string[], env?: NodeJS.ProcessEnv): RunResult {
+	const result = spawnSync(process.execPath, ["--import", tsxLoader, cliPath, ...args], {
+		cwd,
+		encoding: "utf8",
+		env: env ? { ...process.env, ...env } : process.env,
+	});
 	return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
 }
 
@@ -522,6 +526,46 @@ levels: {}
 		expect(help.status).toBe(0);
 		expect(help.stdout).toContain("check");
 		expect(help.stdout).toContain("validate");
+	});
+
+	it("adopt (zero-touch) followed by a bare `gatekeeper check` from inside the adopted repo resolves via the controls index", () => {
+		// A control/hub checkout with the same fixture registry used throughout this
+		// file, plus an unrelated target repo -- both live under tmpBase so afterAll's
+		// rmSync cleans them up along with everything else.
+		const controlRoot = path.join(tmpBase, "adopt-control");
+		const controlRegistryDir = path.join(controlRoot, "governance", "registry");
+		mkdirSync(path.join(controlRegistryDir, "contracts"), { recursive: true });
+		writeFileSync(path.join(controlRegistryDir, "policy.yaml"), stringifyYaml(fixture.registry.policy));
+		writeFileSync(
+			path.join(controlRegistryDir, "contracts", "ci-image-tag.yaml"),
+			stringifyYaml(fixture.registry.contracts[0]),
+		);
+
+		const targetRepoDir = path.join(tmpBase, "adopt-target");
+		mkdirSync(targetRepoDir, { recursive: true });
+		git(targetRepoDir, ["init", "-q"]);
+		git(targetRepoDir, ["symbolic-ref", "HEAD", "refs/heads/main"]);
+		git(targetRepoDir, ["config", "user.email", "e2e@example.com"]);
+		git(targetRepoDir, ["config", "user.name", "E2E Bot"]);
+		git(targetRepoDir, ["remote", "add", "origin", "git@github.com:org/app.git"]);
+		writeFileSync(path.join(targetRepoDir, "README.md"), "hello\n");
+		git(targetRepoDir, ["add", "-A"]);
+		git(targetRepoDir, ["commit", "-q", "-m", "init"]);
+
+		// Isolated from every other test in this file: its own GATEKEEPER_CONFIG_DIR,
+		// never the real ~/.config/gatekeeper/controls.yaml (see src/config/controls.ts).
+		const controlsConfigDir = path.join(tmpBase, "adopt-controls-config");
+		const env = { GATEKEEPER_CONFIG_DIR: controlsConfigDir };
+
+		const adopted = runCli(targetRepoDir, ["adopt", "--control", controlRoot], env);
+		expect(adopted.status).toBe(0);
+		expect(existsSync(path.join(targetRepoDir, ".gatekeeper.yml"))).toBe(false);
+
+		const checked = runCli(targetRepoDir, ["check", "--working-tree", "--json"], env);
+		expect(checked.status).toBe(0);
+		const verdict = JSON.parse(checked.stdout);
+		expect(verdict.repo).toBe("org/app");
+		expect(verdict.degraded).toBeUndefined();
 	});
 });
 

@@ -1,9 +1,10 @@
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { renderAgentsFile } from "../agent/agentsFile.js";
 import { assignRolesToClis } from "../agent/assign.js";
 import { type DetectedAgentCli, detectAgentClis } from "../agent/detect.js";
+import { upsertControl } from "../config/controls.js";
 import { saveRepos } from "../config/repos.js";
 import { packagedRoleCardPath, ROLE_CARD_NAMES, RoleCardNotFoundError } from "../roles/cards.js";
 import { defaultRolesPolicyPath, parseRolesPolicy, RolesPolicyParseError } from "../roles/policy.js";
@@ -44,6 +45,23 @@ import { runValidate } from "./validate.js";
  * untouched) -- never the in-memory packaged content -- and fails closed
  * (exit 2) if that file exists but fails to parse, rather than silently
  * falling back to packaged tier preferences.
+ *
+ * After the registry directory exists (policy.yaml/repos.yaml written or
+ * left untouched), this command also registers *itself* in this machine's
+ * user-level controls index (`~/.config/gatekeeper/controls.yaml`, see
+ * src/config/controls.ts) -- the same registration `gatekeeper adopt` does
+ * for a control it points `--control` at. Because a control repo never
+ * adopts itself into its own `repos.yaml` (adopt refuses overlapping
+ * control/target repos), `locateOwningControl`'s reverse lookup falls back
+ * to a *self-match* (registry only, no repo identity -- there is no roster
+ * entry to take one from) whenever the repo root being looked up is this
+ * control's own root. That self-match is what actually lets a freshly
+ * `init-control`'d hub be found by other commands' zero-flag config
+ * discovery (src/config/discover.ts's discoverConfigWithControlsIndex,
+ * src/config/controls.ts's locateOwningControl) from inside itself, without
+ * a `.gatekeeper.yml` -- registration here alone is necessary but not
+ * sufficient; see locateOwningControl's own doc comment for the matching
+ * logic this registration feeds.
  */
 
 export interface InitControlOptions {
@@ -57,6 +75,10 @@ export interface InitControlOptions {
 export interface InitControlDependencies {
 	/** Injectable local-CLI detector (defaults to detectAgentClis) -- tests stub PATH/spawn without touching the real machine. */
 	detectAgentClis?: typeof detectAgentClis;
+	/** Injectable clock for the controls index `registered_at` timestamp. */
+	now?: () => string;
+	/** Process (or injected) environment; only GATEKEEPER_CONFIG_DIR is consulted (controls index location). */
+	env?: NodeJS.ProcessEnv;
 }
 
 interface GeneratedLine {
@@ -238,6 +260,17 @@ export async function runInitControl(
 
 	await writeReposArtifact(controlRoot, registryDir, lines);
 
+	// Self-register in the user-level controls index (see this command's own
+	// doc comment above) -- registryDir already exists by this point (the
+	// policy.yaml write above creates it, whether or not it was skipped).
+	const controlRootRealPath = await realpath(controlRoot);
+	const registryRealPath = await realpath(registryDir);
+	const now = dependencies.now ?? (() => new Date().toISOString());
+	await upsertControl(
+		{ control: controlRootRealPath, registry: registryRealPath, registered_at: now() },
+		dependencies.env ?? process.env,
+	);
+
 	for (const card of ROLE_CARD_NAMES) {
 		const sourcePath = packagedRoleCardPath(card);
 		if (!(await pathExists(sourcePath))) {
@@ -317,6 +350,9 @@ export async function runInitControl(
 	for (const line of summarize(lines)) {
 		process.stdout.write(`${line}\n`);
 	}
+	process.stdout.write(
+		`gatekeeper init-control: registered control ${controlRootRealPath} in the local controls index\n`,
+	);
 
 	if (options.detect === false) {
 		process.stdout.write("\ngatekeeper init-control: skipped agent CLI detection (--no-detect)\n");

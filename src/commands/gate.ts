@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import {
 	ConfigDiscoveryError,
 	type DiscoveredConfig,
-	discoverConfig,
+	discoverConfigWithControlsIndex,
 	missingRegistryMessage,
 	resolveConfiguredField,
 	resolveRegistryOption,
@@ -512,9 +512,16 @@ export async function runGate(options: GateOptions, cwd: string, dependencies: G
 	const env = dependencies.env ?? process.env;
 	const commentAuthorLogin = dependencies.commentAuthorLogin ?? env.GATEKEEPER_COMMENT_AUTHOR;
 	try {
-		// Config discovery (.gatekeeper.yml) is infrastructure like the registry/GitHub
-		// providers below: a damaged config file degrades (fail-open) rather than blocking.
-		const discovered = await discoverConfig(cwd);
+		// Config discovery (.gatekeeper.yml, falling back to the user-level controls
+		// index) is infrastructure like the registry/GitHub providers below: a
+		// damaged config file degrades (fail-open) rather than blocking.
+		const { discovered, warnings: discoveryWarnings } = await discoverConfigWithControlsIndex(cwd, {
+			mode: "gate",
+			env,
+		});
+		for (const warning of discoveryWarnings) {
+			process.stderr.write(`warning: ${warning}\n`);
+		}
 		const registryPath = resolveRegistryOption({ cliValue: options.registry, discovered });
 		if (!registryPath) {
 			process.stderr.write(`${missingRegistryMessage("gate")}\n`);

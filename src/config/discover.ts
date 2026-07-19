@@ -1,8 +1,11 @@
-import { readFile, stat } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { parseDocument } from "yaml";
 import { z } from "zod";
+
+import { GitDiffError, resolveRepoRoot } from "../providers/gitdiff.js";
+import { locateOwningControl } from "./controls.js";
 
 /**
  * `.gatekeeper.yml` config discovery: a single, shared implementation of
@@ -221,6 +224,172 @@ export async function discoverConfig(cwd: string): Promise<DiscoveredConfig | nu
 	}
 }
 
+const CONTROLS_INDEX_SOURCE_PATH = "<controls index>";
+
+export interface ControlsIndexDiscoveryOptions {
+	/** Process (or injected) environment; forwarded to loadControlsIndex/GATEKEEPER_CONFIG_DIR. */
+	env?: NodeJS.ProcessEnv;
+	/**
+	 * "gate": check/gate call sites. A stale controls-index entry (a
+	 * registered control repo no longer present on disk) that still leaves a
+	 * *match* is dropped silently from the warning list, matching the
+	 * fail-open infrastructure posture those commands already apply
+	 * everywhere else -- but a stale entry that is the *reason no match was
+	 * found at all* escalates to a thrown `ConfigDiscoveryError` instead
+	 * (routed through check/gate's own degrade path: a loud warning, not a
+	 * silent "missing registry"). "tool": every other command (validate/
+	 * doctor/audit/triage/stats/init/provision) -- stale entries are always
+	 * surfaced as warnings, never thrown, like every other local-authoring-
+	 * command input problem. A multi-claim warning (two controls both
+	 * registered the same repo) is never dropped in either mode -- it
+	 * signals a real ambiguity in the operator's own setup, not routine
+	 * staleness.
+	 */
+	mode: "gate" | "tool";
+}
+
+/**
+ * Fifth and final tier of the config-resolution priority chain (CLI flag >
+ * `GATEKEEPER_REGISTRY` env > `.gatekeeper.yml` upward search > controls
+ * index reverse discovery): when no `.gatekeeper.yml` is found by
+ * `discoverConfig` above, and `cwd` sits inside a Git working tree, look up
+ * `cwd`'s repo root in the user-level controls index
+ * (src/config/controls.ts) -- the ledger `gatekeeper adopt`/`gatekeeper
+ * init-control` write to on this machine without ever touching the adopted
+ * repo itself (see src/commands/adopt.ts's zero-touch header comment). A
+ * match is synthesized into the same `DiscoveredConfig` shape `discoverConfig`
+ * returns (`registry` already absolute, so `resolveRegistryOption`'s
+ * relative-path branch is a no-op; `repo` taken from the matching
+ * `repos.yaml` entry, not re-derived from `git remote`, so it honors whatever
+ * identity `adopt --repo` recorded) -- every existing call site's
+ * `resolveRegistryOption`/`resolveConfiguredField` calls therefore need no
+ * change to consume it.
+ *
+ * `cwd` confirmed not being a Git working tree (GitDiffError with
+ * `kind: "not-a-worktree"` from resolveRepoRoot) is not an error here --
+ * this discovery tier simply does not apply, same as an absent
+ * `.gatekeeper.yml`. Any other git-command failure resolving that root
+ * (`kind: "infra"` -- spawn failure, permissions, unexpected exit code) is a
+ * real infrastructure fault, not "doesn't apply", and is *not* swallowed the
+ * same way (see resolveRepoRoot's own doc comment for why this distinction
+ * matters: silently treating a git infra hiccup as "not adopted" turns it
+ * into a misleading "missing registry" exit for an already-adopted repo).
+ *
+ * A controls index or a matched control's `repos.yaml` that exists but fails
+ * to parse *is* an error -- re-thrown as `ConfigDiscoveryError` so it flows
+ * through the exact same fail-open (check/gate degrade) / fail-loud
+ * (validate/doctor/audit/...) handling every call site already has for a
+ * damaged `.gatekeeper.yml`, without those call sites needing a second catch
+ * clause for a different error type. The same applies when a stale
+ * controls-index entry is the sole reason no match was found at all under
+ * `mode: "gate"` -- see the `mode` option's own doc comment.
+ */
+export async function discoverConfigWithControlsIndex(
+	cwd: string,
+	options: ControlsIndexDiscoveryOptions,
+): Promise<{ discovered: DiscoveredConfig | null; warnings: string[] }> {
+	const direct = await discoverConfig(cwd);
+	if (direct) {
+		return { discovered: direct, warnings: [] };
+	}
+
+	let repoRootRealPath: string;
+	try {
+		const repoRoot = await resolveRepoRoot(cwd);
+		repoRootRealPath = await realpath(repoRoot);
+	} catch (error) {
+		if (error instanceof GitDiffError && error.kind !== "infra") {
+			// Confirmed "cwd is not inside a Git working tree" (kind
+			// "not-a-worktree"), or a GitDiffError from some source that
+			// predates the kind classification (kind undefined) -- treated the
+			// same, conservatively, as the pre-existing behavior for anything
+			// that isn't specifically flagged "infra". This discovery tier
+			// simply does not apply, same as an absent .gatekeeper.yml.
+			return { discovered: null, warnings: [] };
+		}
+		// Either a non-GitDiffError failure (e.g. realpath EACCES/ELOOP on an
+		// otherwise-valid Git working tree), or a GitDiffError explicitly
+		// classified "infra" by resolveRepoRoot (spawn failure, permissions,
+		// unexpected exit code -- see its own doc comment): both are
+		// infrastructure damage, not "this discovery tier doesn't apply" --
+		// must flow through the same ConfigDiscoveryError fail-open (check/gate
+		// degrade) / fail-loud (validate/doctor/...) handling every call site
+		// already has, not be thrown bare or silently swallowed. A bare/
+		// swallowed throw here previously either escaped gate's
+		// isInfrastructureFailure allowlist as an unrecognized error type
+		// (fell through to rejectInvalid, fail-closed) or was silently treated
+		// as "not adopted" (missing-registry exit 2) for an *already-adopted*
+		// repo hitting a transient git infra fault -- both exactly backwards
+		// for an infrastructure fault (see the fail-direction law).
+		throw new ConfigDiscoveryError(
+			`failed to resolve the Git working tree root for ${cwd}: ${error instanceof Error ? error.message : String(error)}`,
+			{ cause: error },
+		);
+	}
+
+	let located: Awaited<ReturnType<typeof locateOwningControl>>;
+	try {
+		located = await locateOwningControl(repoRootRealPath, options.env ?? process.env);
+	} catch (error) {
+		throw new ConfigDiscoveryError(
+			`controls index lookup for ${repoRootRealPath} failed: ${error instanceof Error ? error.message : String(error)}`,
+			{ cause: error },
+		);
+	}
+
+	if (!located.match) {
+		const staleWarnings = located.warnings.filter((warning) => warning.kind === "stale-control");
+		if (options.mode === "gate" && staleWarnings.length > 0) {
+			// A stale controls-index entry (a registered control repo's root no
+			// longer exists on disk -- moved/deleted checkout) is infrastructure
+			// damage, not "this repo isn't configured": silently returning
+			// `discovered: null` here previously turned it into a plain
+			// "missing registry" exit 2 for check/gate, indistinguishable from an
+			// operator who simply never ran `adopt` -- zero signal that
+			// something on this machine actually broke. check/gate's own
+			// fail-open degrade path already surfaces a ConfigDiscoveryError as
+			// a loud warning (+ exit 0, or --strict-infra exit 2 for check) --
+			// reuse it here instead. Tool-mode callers are unaffected: they
+			// already receive every stale-control warning via the `warnings`
+			// array below (the `options.mode === "tool"` branch) and print it
+			// themselves -- fail-loud is their own command's job, not this
+			// function's.
+			throw new ConfigDiscoveryError(
+				`controls index has stale entries for ${repoRootRealPath}: ${staleWarnings.map((warning) => warning.message).join("; ")}`,
+			);
+		}
+		return {
+			discovered: null,
+			warnings: located.warnings
+				.filter((warning) => options.mode === "tool" || warning.kind === "multi-claim")
+				.map((warning) => warning.message),
+		};
+	}
+
+	const warnings = located.warnings
+		.filter((warning) => options.mode === "tool" || warning.kind === "multi-claim")
+		.map((warning) => warning.message);
+
+	// Self-match (a control repo discovering itself, e.g. `doctor`/`provision`
+	// run with zero flags from inside a freshly `init-control`'d hub) has no
+	// repo identity to offer -- omit the key entirely rather than setting an
+	// explicit `repo: undefined`, matching discoverConfig's own convention of
+	// only including fields the source actually supplied (see
+	// parseConfigDocument above).
+	return {
+		discovered: {
+			path: CONTROLS_INDEX_SOURCE_PATH,
+			dir: repoRootRealPath,
+			config: {
+				apiVersion: "gatekeeper/v1",
+				registry: located.match.registry,
+				...(located.match.repo !== undefined ? { repo: located.match.repo } : {}),
+			},
+		},
+		warnings,
+	};
+}
+
 export interface RegistryOptionInput {
 	/** Explicit --registry CLI flag value, if given. */
 	cliValue?: string;
@@ -266,11 +435,12 @@ export function resolveConfiguredField(
 	return cliValue ?? discovered?.config[field];
 }
 
-/** Shared "how do I provide a registry" hint for the three-way message check/gate/validate/doctor/audit/triage print when none of CLI/env/config resolve one. */
+/** Shared "how do I provide a registry" hint check/gate/validate/doctor/audit/triage/stats/init/provision print when none of the five resolution tiers (CLI flag, GATEKEEPER_REGISTRY, .gatekeeper.yml, controls index, prior default) produce one. */
 export function missingRegistryMessage(command: string): string {
 	return (
 		`gatekeeper ${command}: --registry is required; provide --registry <dir>, set GATEKEEPER_REGISTRY, ` +
-		`or add a ${GATEKEEPER_CONFIG_FILENAME} with a "registry:" field (see \`gatekeeper adopt\`).`
+		`add a ${GATEKEEPER_CONFIG_FILENAME} with a "registry:" field, or run \`gatekeeper adopt\` (registers this repo ` +
+		"in the local controls index, so it resolves with zero flags -- see discoverConfigWithControlsIndex above)."
 	);
 }
 

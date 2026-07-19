@@ -36,7 +36,11 @@
 
 - [T-07 低优] tests/agent-detect.test.ts 相对段用例的 chdir-free 硬化（codex 处方：path.relative 构造，免疫未来 pool 切换；当前默认 forks 池下 511 全绿，非缺陷）
 
-| T-20260719-08 | 运维 | Syncify 生态真实接入（新总控仓 syncify-governance：init-control + 4 真实契约 + 6 仓 adopt + provision agents-md/hooks + 零参数冒烟三仓全对） | 调度者 | 运维操作无 review 轮 | ✅ 完成（总控仓 9b7b170） | - |
+| T-20260719-08 | 运维 | Syncify 生态真实接入（新总控仓 syncify-governance：init-control + 4 真实契约 + 6 仓 adopt + provision agents-md/hooks + 零参数冒烟三仓全对） | 调度者 | 运维操作无 review 轮 | ✅ 完成（总控仓 9b7b170） | tasks/records/T-20260719-08-syncify-onboarding.md |
+
+| T-20260719-09 | 设计修正 | adopt 零接触化（用户裁定：登记信息只进总控仓，被管仓不得有任何修改）+ 用户级 controls 索引反向发现保零参数 | sonnet-coder | codex+claude(opus)+grok 三路，4 轮（R3 超限仲裁授权补充轮），三路计 15 项实质缺陷 | ✅ 完成（581 测试） | tasks/records/T-20260719-09-adopt-zero-touch.md |
+
+| T-20260719-10 | 架构设计 | dispatch 最小版设计：CLI 进程统一抽象 + 状态机 + 限额/挂掉的切换与重唤起（用户立项） | deep-reasoner | 设计交付，无 review 轮（实现包 A-F 各自走闭环） | ✅ 设计定稿（调度者已裁 3 项未决） | tasks/records/T-20260719-10-dispatch-design.md |
 
 ### 遗留债队列（活动，v1.1 候选）
 

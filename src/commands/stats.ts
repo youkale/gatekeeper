@@ -1,7 +1,8 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
-import { discoverConfig, resolveConfiguredField } from "../config/discover.js";
+import { discoverConfigWithControlsIndex, resolveConfiguredField } from "../config/discover.js";
+import { resolveRepo } from "../providers/gitdiff.js";
 import type { GitHubFetch } from "../providers/github.js";
 import { COMMENT_MARKER, type GatekeeperLedger } from "../render/comment.js";
 
@@ -470,14 +471,38 @@ export async function runStats(
 	dependencies: StatsDependencies = {},
 ): Promise<number> {
 	try {
-		// Config discovery (.gatekeeper.yml) only ever fills in `repo` here (stats
-		// has no registry option); a damaged config file is fail-loud like every
-		// other stats input error below.
-		const discovered = await discoverConfig(cwd);
+		// Config discovery (.gatekeeper.yml, falling back to the user-level
+		// controls index) only ever fills in `repo` here (stats has no registry
+		// option); a damaged config file is fail-loud like every other stats
+		// input error below.
+		const { discovered, warnings: discoveryWarnings } = await discoverConfigWithControlsIndex(cwd, {
+			mode: "tool",
+			env: dependencies.env,
+		});
+		for (const discoveryWarning of discoveryWarnings) {
+			process.stderr.write(`warning: ${discoveryWarning}\n`);
+		}
 		const effectiveOptions: StatsOptions = {
 			...options,
 			repo: resolveConfiguredField(options.repo, discovered, "repo"),
 		};
+
+		// Same fallback tail check.ts/gate.ts/doctor.ts/triage.ts already apply:
+		// a self-match discovery (a hub repo discovering its own root, see
+		// src/config/controls.ts's locateOwningControl) has no repo identity to
+		// offer, so without this, `--source github` could never resolve a repo
+		// with zero flags from inside a hub that does have an origin remote.
+		// Scoped to `--source github` only -- `--source local` never needs a
+		// repo at all, so this must not turn an unrelated missing-origin
+		// checkout into a hard failure for that source.
+		if (effectiveOptions.source === "github" && !effectiveOptions.repo) {
+			try {
+				effectiveOptions.repo = await resolveRepo(cwd, undefined);
+			} catch {
+				// Fall through -- githubLedgers below throws the existing, clearer
+				// "--repo is required when --source github is selected" StatsError.
+			}
+		}
 
 		let parsed: ParsedLedgers;
 		let totalPrs: number | undefined;

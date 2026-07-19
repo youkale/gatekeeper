@@ -2,7 +2,7 @@ import { appendFile, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { type CheckOptions, runCheck } from "./commands/check.js";
+import { type CheckDependencies, type CheckOptions, runCheck } from "./commands/check.js";
 import {
 	applyCommentPlan,
 	type GateDependencies,
@@ -56,7 +56,7 @@ export interface ActionDependencies {
 	cwd?: string;
 	readFile?: (file: string) => Promise<string>;
 	appendSummary?: (file: string, content: string) => Promise<void>;
-	runCheck?: (options: CheckOptions, cwd: string) => Promise<number>;
+	runCheck?: (options: CheckOptions, cwd: string, dependencies?: CheckDependencies) => Promise<number>;
 	runGate?: (options: GateOptions, cwd: string, dependencies?: GateDependencies) => Promise<number>;
 	createProvider?: ActionProviderFactory;
 	gateDependencies?: Omit<GateDependencies, "env" | "createProvider">;
@@ -560,6 +560,12 @@ async function executeAction(
 				json: true,
 			},
 			cwd,
+			// Symmetric with the gate-mode call above: thread the Action's own
+			// `env` through to runCheck's controls-index discovery fallback
+			// (src/config/discover.ts), even though `registry`/`repo` are always
+			// given explicitly here and so already win outright -- consistency
+			// with gate, not a behavior-affecting fix for this call site today.
+			{ env },
 		),
 	);
 	const decision = classifyCommand(capture, "check");

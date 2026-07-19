@@ -6,7 +6,7 @@ import picomatch from "picomatch";
 
 import {
 	ConfigDiscoveryError,
-	discoverConfig,
+	discoverConfigWithControlsIndex,
 	missingRegistryMessage,
 	resolveRegistryOption,
 } from "../config/discover.js";
@@ -19,6 +19,11 @@ export interface AuditOptions {
 	registry?: string;
 	repoPath?: string[];
 	json?: boolean;
+}
+
+export interface AuditDependencies {
+	/** Process (or injected) environment; forwarded to config discovery's controls-index fallback (only GATEKEEPER_CONFIG_DIR is consulted -- see src/config/controls.ts). */
+	env?: NodeJS.ProcessEnv;
 }
 
 export interface AuditMissingGlob {
@@ -194,12 +199,23 @@ function emitReport(report: AuditReport, json: boolean): void {
  * Audit is a registry-health command, not a merge verdict: confirmed drift is
  * exit 1, while an invalid invocation/checkout/registry is exit 2.
  */
-export async function runAudit(options: AuditOptions, cwd: string): Promise<number> {
+export async function runAudit(
+	options: AuditOptions,
+	cwd: string,
+	dependencies: AuditDependencies = {},
+): Promise<number> {
 	try {
-		// Config discovery (.gatekeeper.yml) is a local-authoring-command input like
-		// the registry directory itself: a damaged config file is fail-loud (exit
-		// 2), same as any other audit input error below.
-		const discovered = await discoverConfig(cwd);
+		// Config discovery (.gatekeeper.yml, falling back to the user-level
+		// controls index) is a local-authoring-command input like the registry
+		// directory itself: a damaged config file is fail-loud (exit 2), same as
+		// any other audit input error below.
+		const { discovered, warnings: discoveryWarnings } = await discoverConfigWithControlsIndex(cwd, {
+			mode: "tool",
+			env: dependencies.env,
+		});
+		for (const discoveryWarning of discoveryWarnings) {
+			process.stderr.write(`warning: ${discoveryWarning}\n`);
+		}
 		const registryPath = resolveRegistryOption({ cliValue: options.registry, discovered });
 		if (!registryPath) {
 			const reason = missingRegistryMessage("audit");

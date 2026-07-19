@@ -8,6 +8,10 @@
 
 - [Syncify 真实接入 2026-07-19] 首次生产化部署的三条 dogfood 信号：① init-control 未给总控仓自身写 .gatekeeper.yml，hub 侧命令（provision/doctor/triage/stats）在总控根下不能零参数（需求信号：init-control 应顺手写指向自身注册表的配置）；② CI 注入的真实前置是"gatekeeper 在 runner 上可安装"（npm 发布或烧进 ci 镜像——后者正好归 ci-image-tag 契约管辖，自指闭环）；③ doctor 对 GitLab 生态输出 GitHub workflow 告警（平台感知缺失，GitLab 支持已在 v2 债）→ 处置：三条均记 LEDGER 待办，真实使用继续积累。
 
+- [T-20260719-09] codex review 沙箱只读致 vitest EPERM 假失败 ×3（R1/R2/R3 各一次，R3 险些被当成验收阻断）→ 同类 ≥2 规范修订触发：codex-reviewer 角色文件增「沙箱测试失败一律标注噪音、以调度者本机运行为地面事实」条款 → 处置：已修订 .claude/agents/codex-reviewer.md。
+- [T-20260719-08] 运维任务标 ✅ 未写 record，被 R2 治理检查器（R2 规则）在下一个任务的验收中拦下——机器检查器首次抓住调度者自己的流程漏洞（产品自证）→ 运维/无 review 任务同样必须当场写 record → 处置：record 补写；本条留档。
+- [T-20260719-09] 修复轮的「预防性补项」有效：编码者自评风险（controls.yaml 未同款原子写）被调度者判为下轮必报 blocker，先行派修避免了可预见的第 4 轮全量往返 → 自评风险不只是给 reviewer 的线索，也是调度者的排程输入。
+
 ## MVP 收官总复盘（2026-07-18）
 
 - **三路对抗 review 的量化战绩**：8 个任务、约 20 轮 review，三路合计报出 30+ 实质缺陷，其中跨路零重叠的独家发现占多数（claude 擅长 fail 方向全路径与语义一致性、codex 擅长权限拓扑/时序绕关/外部事实权威取证、grok 擅长字节级完整性与文件形态）。任何双路组合都会漏掉至少一类。dogfooding 结论：产品的 M-of-N 跨厂商 lane 设计有实证支撑。

@@ -8,7 +8,7 @@ import { AgentRunError, type AgentRunResult, runAgentCommand } from "../agent/ru
 import {
 	ConfigDiscoveryError,
 	type DiscoveredConfig,
-	discoverConfig,
+	discoverConfigWithControlsIndex,
 	missingAgentMessage,
 	missingRegistryMessage,
 	resolveConfiguredField,
@@ -18,6 +18,7 @@ import { formatRegistryIssue, RegistryParseError } from "../engine/registry.js";
 import type { Registry } from "../engine/types.js";
 import { LanePresetParseError, LanePresetReadError, loadRegistryWithLanePresets } from "../gate/presets.js";
 import { RegistryReadError } from "../providers/fsregistry.js";
+import { GitDiffError, resolveRepo } from "../providers/gitdiff.js";
 import { type GitHubIssue, GitHubProvider, type GitHubProviderOptions, InfraError } from "../providers/github.js";
 import {
 	buildTriageLedgerEntry,
@@ -786,12 +787,16 @@ export async function runTriage(
 		return 2;
 	}
 
-	// Config discovery (.gatekeeper.yml) is a local-authoring-command input like
-	// the registry directory itself: triage fails loud on damage, not the
-	// check/gate degrade path.
-	let discovered: Awaited<ReturnType<typeof discoverConfig>>;
+	// Config discovery (.gatekeeper.yml, falling back to the user-level controls
+	// index) is a local-authoring-command input like the registry directory
+	// itself: triage fails loud on damage, not the check/gate degrade path.
+	let discovered: Awaited<ReturnType<typeof discoverConfigWithControlsIndex>>["discovered"];
 	try {
-		discovered = await discoverConfig(cwd);
+		const result = await discoverConfigWithControlsIndex(cwd, { mode: "tool", env: dependencies.env });
+		discovered = result.discovered;
+		for (const discoveryWarning of result.warnings) {
+			process.stderr.write(`warning: ${discoveryWarning}\n`);
+		}
 	} catch (error) {
 		if (!(error instanceof ConfigDiscoveryError)) {
 			throw error;
@@ -805,10 +810,21 @@ export async function runTriage(
 		process.stderr.write(`${missingRegistryMessage("triage")}\n`);
 		return 2;
 	}
-	const repo = resolveConfiguredField(options.repo, discovered, "repo");
-	if (!repo) {
+	// Same fallback chain as check.ts/gate.ts/doctor.ts: explicit --repo, then
+	// .gatekeeper.yml/controls-index `repo:` (resolveConfiguredField), then
+	// resolveRepo's own `git remote get-url origin` auto-detection -- a
+	// self-match discovery (a hub repo discovering its own root, see
+	// src/config/controls.ts's locateOwningControl) has no repo identity to
+	// offer, so without this fallback triage could never resolve a repo with
+	// zero flags from inside a hub that does have an origin remote.
+	let repo: string;
+	try {
+		repo = await resolveRepo(cwd, resolveConfiguredField(options.repo, discovered, "repo"));
+	} catch (error) {
 		process.stderr.write(
-			'gatekeeper triage: --repo is required; provide --repo <org/name> or add a .gatekeeper.yml with a "repo:" field.\n',
+			"gatekeeper triage: could not resolve a repo identity " +
+				`(${error instanceof GitDiffError ? error.reason : String(error)}); ` +
+				'provide --repo <org/name> or add a .gatekeeper.yml with a "repo:" field.\n',
 		);
 		return 2;
 	}

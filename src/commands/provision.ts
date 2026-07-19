@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import {
 	ConfigDiscoveryError,
 	type DiscoveredConfig,
-	discoverConfig,
+	discoverConfigWithControlsIndex,
 	missingRegistryMessage,
 	resolveRegistryOption,
 } from "../config/discover.js";
@@ -309,12 +309,16 @@ export async function runProvision(
 	cwd: string,
 	dependencies: ProvisionDependencies = {},
 ): Promise<number> {
-	// Config discovery (.gatekeeper.yml) is a local-authoring-command input like
-	// the registry directory itself: provision fails loud on damage, not the
-	// check/gate degrade path.
+	// Config discovery (.gatekeeper.yml, falling back to the user-level controls
+	// index) is a local-authoring-command input like the registry directory
+	// itself: provision fails loud on damage, not the check/gate degrade path.
 	let discovered: DiscoveredConfig | null;
 	try {
-		discovered = await discoverConfig(cwd);
+		const result = await discoverConfigWithControlsIndex(cwd, { mode: "tool", env: dependencies.env });
+		discovered = result.discovered;
+		for (const discoveryWarning of result.warnings) {
+			process.stderr.write(`warning: ${discoveryWarning}\n`);
+		}
 	} catch (error) {
 		if (!(error instanceof ConfigDiscoveryError)) {
 			throw error;

@@ -1,18 +1,48 @@
 import { execFileSync, spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { parse as parseYaml } from "yaml";
 
-import { runAdopt } from "../src/commands/adopt.js";
+import { type AdoptDependencies, runAdopt as runAdoptImpl } from "../src/commands/adopt.js";
+import { loadControlsIndex, locateOwningControl } from "../src/config/controls.js";
 import { loadRepos, pathsOverlap } from "../src/config/repos.js";
 
 const repoRootDir = fileURLToPath(new URL("..", import.meta.url));
 const cliPath = path.join(repoRootDir, "src/cli.ts");
 const tsxLoader = path.join(repoRootDir, "node_modules/tsx/dist/loader.mjs");
+
+// `gatekeeper adopt` is zero-touch on the target repo, but it does write
+// host-machine state: this machine's user-level controls index (see
+// src/config/controls.ts). Every test in this file gets its own throwaway
+// config dir so none of them ever read or write the real
+// ~/.config/gatekeeper/controls.yaml -- see the identical pattern in
+// tests/init-control.test.ts and tests/provision.test.ts.
+let controlsConfigDir: string | undefined;
+
+afterEach(() => {
+	if (controlsConfigDir) {
+		rmSync(controlsConfigDir, { recursive: true, force: true });
+		controlsConfigDir = undefined;
+	}
+});
+
+function makeControlsConfigDir(): string {
+	controlsConfigDir = mkdtempSync(path.join(tmpdir(), "gatekeeper-adopt-configdir-"));
+	return controlsConfigDir;
+}
+
+async function runAdopt(
+	options: Parameters<typeof runAdoptImpl>[0],
+	cwd: string,
+	dependencies: AdoptDependencies = {},
+): Promise<number> {
+	const configDir = controlsConfigDir ?? makeControlsConfigDir();
+	return runAdoptImpl(options, cwd, { ...dependencies, env: dependencies.env ?? { GATEKEEPER_CONFIG_DIR: configDir } });
+}
 
 interface RunResult {
 	status: number;
@@ -21,7 +51,12 @@ interface RunResult {
 }
 
 function runCli(cwd: string, args: string[]): RunResult {
-	const result = spawnSync(process.execPath, ["--import", tsxLoader, cliPath, ...args], { cwd, encoding: "utf8" });
+	const configDir = controlsConfigDir ?? makeControlsConfigDir();
+	const result = spawnSync(process.execPath, ["--import", tsxLoader, cliPath, ...args], {
+		cwd,
+		encoding: "utf8",
+		env: { ...process.env, GATEKEEPER_CONFIG_DIR: configDir },
+	});
 	return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
 }
 
@@ -109,6 +144,10 @@ async function makeGitRepo(base: string, name: string, remote = "git@github.com:
 	return repoDir;
 }
 
+async function gitStatusPorcelain(repoDir: string): Promise<string> {
+	return git(repoDir, ["status", "--porcelain"]);
+}
+
 describe("gatekeeper adopt: preconditions (nothing written on failure)", () => {
 	it("exits 2 outside a Git working tree", async () => {
 		const base = await makeTmpDir("gatekeeper-adopt-nongit-");
@@ -119,7 +158,6 @@ describe("gatekeeper adopt: preconditions (nothing written on failure)", () => {
 		const exitCode = await runAdopt({ control: controlRoot }, nonGitDir);
 
 		expect(exitCode).toBe(2);
-		expect(await pathExists(path.join(nonGitDir, ".gatekeeper.yml"))).toBe(false);
 		expect(await pathExists(path.join(registryDir, "repos.yaml"))).toBe(false);
 	});
 
@@ -132,7 +170,6 @@ describe("gatekeeper adopt: preconditions (nothing written on failure)", () => {
 		const exitCode = await runAdopt({ control: controlRoot }, repoDir);
 
 		expect(exitCode).toBe(2);
-		expect(await pathExists(path.join(repoDir, ".gatekeeper.yml"))).toBe(false);
 	});
 
 	it("prints the three candidate locations it tried, in order, to stderr", async () => {
@@ -186,7 +223,6 @@ describe("gatekeeper adopt: preconditions (nothing written on failure)", () => {
 		const exitCode = await runAdopt({ control: path.join(base, "control") }, repoDir);
 
 		expect(exitCode).toBe(2);
-		expect(await pathExists(path.join(repoDir, ".gatekeeper.yml"))).toBe(false);
 	});
 
 	it("exits 2 when no repo identity can be resolved (no origin remote, no --repo)", async () => {
@@ -277,21 +313,46 @@ describe("gatekeeper adopt: overlap validation (control vs target)", () => {
 	});
 });
 
-describe("gatekeeper adopt: registration (repos.yaml + .gatekeeper.yml)", () => {
-	it("writes .gatekeeper.yml with a target-root-relative registry path and upserts repos.yaml", async () => {
+describe("gatekeeper adopt: zero-touch on the target repo", () => {
+	it("writes no .gatekeeper.yml and leaves the target repo's git status clean", async () => {
+		const base = await makeTmpDir("gatekeeper-adopt-zerotouch-");
+		const repoDir = await makeGitRepo(base, "repo");
+		const { controlRoot } = await makeControlRepo(base);
+
+		const exitCode = await runAdopt({ control: controlRoot }, repoDir, { now: () => "2026-01-01T00:00:00.000Z" });
+
+		expect(exitCode).toBe(0);
+		expect(await pathExists(path.join(repoDir, ".gatekeeper.yml"))).toBe(false);
+		expect(await gitStatusPorcelain(repoDir)).toBe("");
+	});
+
+	it("--repo does not require or write anything into the target repo", async () => {
+		const base = await makeTmpDir("gatekeeper-adopt-zerotouch-repo-flag-");
+		const repoDir = await makeGitRepo(base, "repo");
+		const { controlRoot } = await makeControlRepo(base);
+
+		const exitCode = await runAdopt({ control: controlRoot, repo: "acme/other" }, repoDir, {
+			now: () => "2026-01-01T00:00:00.000Z",
+		});
+
+		expect(exitCode).toBe(0);
+		expect(await pathExists(path.join(repoDir, ".gatekeeper.yml"))).toBe(false);
+		expect(await gitStatusPorcelain(repoDir)).toBe("");
+	});
+});
+
+describe("gatekeeper adopt: registration (repos.yaml + controls index)", () => {
+	it("upserts repos.yaml and registers the control in the controls index", async () => {
 		const base = await makeTmpDir("gatekeeper-adopt-write-");
 		const repoDir = await makeGitRepo(base, "repo");
 		const { controlRoot, registryDir } = await makeControlRepo(base);
+		const configDir = makeControlsConfigDir();
 
-		const exitCode = await runAdopt({ control: controlRoot }, repoDir, { now: () => "2026-01-01T00:00:00.000Z" });
+		const exitCode = await runAdopt({ control: controlRoot }, repoDir, {
+			now: () => "2026-01-01T00:00:00.000Z",
+			env: { GATEKEEPER_CONFIG_DIR: configDir },
+		});
 		expect(exitCode).toBe(0);
-
-		const configPath = path.join(repoDir, ".gatekeeper.yml");
-		const parsedConfig = parseYaml(await readFile(configPath, "utf8"));
-		expect(parsedConfig.apiVersion).toBe("gatekeeper/v1");
-		expect(parsedConfig.repo).toBeUndefined();
-		expect(path.isAbsolute(parsedConfig.registry)).toBe(false);
-		expect(path.resolve(repoDir, parsedConfig.registry)).toBe(registryDir);
 
 		const repos = await loadRepos(registryDir);
 		// git rev-parse --show-toplevel resolves symlinks (e.g. macOS /var -> /private/var),
@@ -299,9 +360,18 @@ describe("gatekeeper adopt: registration (repos.yaml + .gatekeeper.yml)", () => 
 		expect(repos).toEqual([
 			{ repo: "acme/app", path: await realpath(repoDir), ci: "none", adopted_at: "2026-01-01T00:00:00.000Z" },
 		]);
+
+		const controls = await loadControlsIndex({ GATEKEEPER_CONFIG_DIR: configDir });
+		expect(controls).toEqual([
+			{
+				control: await realpath(controlRoot),
+				registry: await realpath(registryDir),
+				registered_at: "2026-01-01T00:00:00.000Z",
+			},
+		]);
 	});
 
-	it("records an explicit --repo override in both .gatekeeper.yml and repos.yaml", async () => {
+	it("records an explicit --repo override in repos.yaml", async () => {
 		const base = await makeTmpDir("gatekeeper-adopt-repo-override-");
 		const repoDir = await makeGitRepo(base, "repo");
 		const { controlRoot, registryDir } = await makeControlRepo(base);
@@ -310,9 +380,6 @@ describe("gatekeeper adopt: registration (repos.yaml + .gatekeeper.yml)", () => 
 			now: () => "2026-01-01T00:00:00.000Z",
 		});
 		expect(exitCode).toBe(0);
-
-		const parsedConfig = parseYaml(await readFile(path.join(repoDir, ".gatekeeper.yml"), "utf8"));
-		expect(parsedConfig.repo).toBe("acme/other");
 
 		const repos = await loadRepos(registryDir);
 		expect(repos.map((entry) => entry.repo)).toEqual(["acme/other"]);
@@ -338,7 +405,7 @@ describe("gatekeeper adopt: registration (repos.yaml + .gatekeeper.yml)", () => 
 
 	it("adopts a repo given as a positional path, without cd'ing into it", async () => {
 		const base = await makeTmpDir("gatekeeper-adopt-positional-");
-		const { controlRoot } = await makeControlRepo(base);
+		const { controlRoot, registryDir } = await makeControlRepo(base);
 		const repoDir = await makeGitRepo(base, "repo");
 
 		const exitCode = await runAdopt({ control: controlRoot, path: "repo" }, base, {
@@ -346,16 +413,18 @@ describe("gatekeeper adopt: registration (repos.yaml + .gatekeeper.yml)", () => 
 		});
 
 		expect(exitCode).toBe(0);
-		expect(await pathExists(path.join(repoDir, ".gatekeeper.yml"))).toBe(true);
+		expect(await pathExists(path.join(repoDir, ".gatekeeper.yml"))).toBe(false);
+		expect(await loadRepos(registryDir)).toHaveLength(1);
 	});
 
-	it("adopted config makes a bare `gatekeeper check` work with zero registry flags", async () => {
+	it("adopted repo makes a bare `gatekeeper check` work with zero registry flags (reverse discovery via the controls index)", async () => {
 		const base = await makeTmpDir("gatekeeper-adopt-e2e-check-");
 		const repoDir = await makeGitRepo(base, "repo");
 		const { controlRoot } = await makeControlRepo(base);
 
 		const adopted = runCli(repoDir, ["adopt", "--control", controlRoot]);
 		expect(adopted.status).toBe(0);
+		expect(await pathExists(path.join(repoDir, ".gatekeeper.yml"))).toBe(false);
 
 		const checked = runCli(repoDir, ["check", "--working-tree", "--json"]);
 		expect(checked.status).toBe(0);
@@ -379,37 +448,20 @@ describe("gatekeeper adopt: idempotency (rerun for the same repo)", () => {
 		expect(repos[0]?.adopted_at).toBe("2026-06-01T00:00:00.000Z");
 	});
 
-	it("without --force, skips rewriting an existing .gatekeeper.yml but still refreshes repos.yaml (exit 0)", async () => {
-		const base = await makeTmpDir("gatekeeper-adopt-idempotent-config-");
+	it("updates the existing controls index entry in place instead of duplicating it", async () => {
+		const base = await makeTmpDir("gatekeeper-adopt-idempotent-controls-");
 		const repoDir = await makeGitRepo(base, "repo");
 		const { controlRoot, registryDir } = await makeControlRepo(base);
+		const configDir = makeControlsConfigDir();
+		const env = { GATEKEEPER_CONFIG_DIR: configDir };
 
-		await runAdopt({ control: controlRoot, repo: "acme/app" }, repoDir, { now: () => "2026-01-01T00:00:00.000Z" });
-		const configBefore = await readFile(path.join(repoDir, ".gatekeeper.yml"), "utf8");
+		await runAdopt({ control: controlRoot }, repoDir, { now: () => "2026-01-01T00:00:00.000Z", env });
+		await runAdopt({ control: controlRoot }, repoDir, { now: () => "2026-06-01T00:00:00.000Z", env });
 
-		const secondExitCode = await runAdopt({ control: controlRoot }, repoDir, { now: () => "2026-06-01T00:00:00.000Z" });
-
-		expect(secondExitCode).toBe(0);
-		const configAfter = await readFile(path.join(repoDir, ".gatekeeper.yml"), "utf8");
-		expect(configAfter).toBe(configBefore);
-		const repos = await loadRepos(registryDir);
-		expect(repos).toHaveLength(1);
-		expect(repos[0]?.adopted_at).toBe("2026-06-01T00:00:00.000Z");
-	});
-
-	it("--force overwrites an existing .gatekeeper.yml", async () => {
-		const base = await makeTmpDir("gatekeeper-adopt-force-");
-		const repoDir = await makeGitRepo(base, "repo");
-		const { controlRoot } = await makeControlRepo(base);
-
-		await runAdopt({ control: controlRoot, repo: "acme/app" }, repoDir, { now: () => "2026-01-01T00:00:00.000Z" });
-		const exitCode = await runAdopt({ control: controlRoot, repo: "acme/other", force: true }, repoDir, {
-			now: () => "2026-01-01T00:00:00.000Z",
-		});
-
-		expect(exitCode).toBe(0);
-		const parsedConfig = parseYaml(await readFile(path.join(repoDir, ".gatekeeper.yml"), "utf8"));
-		expect(parsedConfig.repo).toBe("acme/other");
+		const controls = await loadControlsIndex(env);
+		expect(controls).toHaveLength(1);
+		expect(controls[0]?.registered_at).toBe("2026-06-01T00:00:00.000Z");
+		expect(controls[0]?.registry).toBe(await realpath(registryDir));
 	});
 
 	it("re-adopting the same repo from a moved checkout updates its path", async () => {
@@ -426,6 +478,77 @@ describe("gatekeeper adopt: idempotency (rerun for the same repo)", () => {
 		const repos = await loadRepos(registryDir);
 		expect(repos).toHaveLength(1);
 		expect(repos[0]?.path).toBe(await realpath(movedRepoDir));
+	});
+
+	it("re-adopting the same checkout with a corrected --repo identity replaces the stale row instead of leaving two entries for the same path (B3)", async () => {
+		const base = await makeTmpDir("gatekeeper-adopt-repo-correction-");
+		const repoDir = await makeGitRepo(base, "repo");
+		const { controlRoot, registryDir } = await makeControlRepo(base);
+		const configDir = makeControlsConfigDir();
+		const env = { GATEKEEPER_CONFIG_DIR: configDir };
+
+		await runAdopt({ control: controlRoot, repo: "acme/wrong-name" }, repoDir, {
+			now: () => "2026-01-01T00:00:00.000Z",
+			env,
+		});
+		await runAdopt({ control: controlRoot, repo: "acme/right-name" }, repoDir, {
+			now: () => "2026-06-01T00:00:00.000Z",
+			env,
+		});
+
+		const repos = await loadRepos(registryDir);
+		// Exactly one row for this checkout's path, under the corrected identity
+		// -- not two (the stale "acme/wrong-name" row must be gone, not merely
+		// shadowed), since locateOwningControl (src/config/controls.ts) matches
+		// repos.yaml by `path` and would otherwise silently resolve whichever
+		// row happens to sort first, which can be the abandoned identity.
+		expect(repos).toHaveLength(1);
+		expect(repos[0]?.repo).toBe("acme/right-name");
+		const repoRealPath = await realpath(repoDir);
+		expect(repos[0]?.path).toBe(repoRealPath);
+
+		// Reverse discovery from inside the repo resolves the corrected identity.
+		const result = await locateOwningControl(repoRealPath, env);
+		expect(result.match?.repo).toBe("acme/right-name");
+	});
+});
+
+describe("gatekeeper adopt: two concurrent, interleaved adopts against the same control both survive (C3)", () => {
+	it("adopting two different repos at once leaves both registered in repos.yaml and the controls index", async () => {
+		const base = await makeTmpDir("gatekeeper-adopt-concurrent-");
+		const { controlRoot, registryDir } = await makeControlRepo(base);
+		const repoADir = await makeGitRepo(base, "repo-a", "git@github.com:acme/repo-a.git");
+		const repoBDir = await makeGitRepo(base, "repo-b", "git@github.com:acme/repo-b.git");
+		const configDir = makeControlsConfigDir();
+		const env = { GATEKEEPER_CONFIG_DIR: configDir };
+
+		// Fired via Promise.all (not one at a time): each `runAdopt` call's own
+		// git-subprocess + file-IO await points give the event loop plenty of
+		// opportunities to interleave the two runs' controls-index and
+		// repos.yaml read-modify-write round trips. Without the same-directory
+		// lock files src/config/filelock.ts adds to upsertControl/upsertRepo,
+		// one of the two adopts could silently lose the other's update.
+		const [exitCodeA, exitCodeB] = await Promise.all([
+			runAdopt({ control: controlRoot, repo: "acme/repo-a" }, repoADir, {
+				now: () => "2026-07-20T00:00:00.000Z",
+				env,
+			}),
+			runAdopt({ control: controlRoot, repo: "acme/repo-b" }, repoBDir, {
+				now: () => "2026-07-20T00:00:01.000Z",
+				env,
+			}),
+		]);
+
+		expect(exitCodeA).toBe(0);
+		expect(exitCodeB).toBe(0);
+
+		const repos = await loadRepos(registryDir);
+		expect(repos.map((entry) => entry.repo).sort()).toEqual(["acme/repo-a", "acme/repo-b"]);
+
+		// Both adopts registered the *same* control (one entry, not lost/split).
+		const controls = await loadControlsIndex(env);
+		expect(controls).toHaveLength(1);
+		expect(controls[0]?.control).toBe(await realpath(controlRoot));
 	});
 });
 
@@ -449,14 +572,20 @@ describe("gatekeeper adopt: repos.yaml `path` is realpath-normalized (grok nb#2)
 	});
 });
 
-describe("gatekeeper adopt: an existing .gatekeeper.yml is validated (not silently skipped) without --force (grok nb#4)", () => {
-	it("warns (but still skips, unchanged) when the existing file is damaged", async () => {
-		const base = await makeTmpDir("gatekeeper-adopt-damaged-skip-");
+describe("gatekeeper adopt: controls-index write failure leaves no half-registered repo (B4)", () => {
+	it("exits 2 and never touches repos.yaml when the controls index cannot be written", async () => {
+		const base = await makeTmpDir("gatekeeper-adopt-controlsindex-failure-");
 		const repoDir = await makeGitRepo(base, "repo");
-		const { controlRoot } = await makeControlRepo(base);
-		const configPath = path.join(repoDir, ".gatekeeper.yml");
-		const damagedContent = "apiVersion: gatekeeper/v1\nregistry: [unterminated\n";
-		await writeFile(configPath, damagedContent, "utf8");
+		const { controlRoot, registryDir } = await makeControlRepo(base);
+
+		// A regular *file* sitting where the controls-config directory needs to
+		// be created makes `mkdir(..., { recursive: true })` inside
+		// saveControlsIndex fail with ENOTDIR -- deterministic and portable
+		// (unlike chmod-based permission games, which root-in-a-CI-container
+		// silently bypasses).
+		const blockedConfigDir = path.join(base, "blocked-config-dir");
+		await writeFile(blockedConfigDir, "not a directory\n", "utf8");
+		const env = { GATEKEEPER_CONFIG_DIR: blockedConfigDir };
 
 		let stderrOutput = "";
 		const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(((chunk: string) => {
@@ -465,39 +594,19 @@ describe("gatekeeper adopt: an existing .gatekeeper.yml is validated (not silent
 		}) as typeof process.stderr.write);
 		let exitCode: number;
 		try {
-			exitCode = await runAdopt({ control: controlRoot, repo: "acme/app" }, repoDir, {
-				now: () => "2026-01-01T00:00:00.000Z",
-			});
+			exitCode = await runAdopt({ control: controlRoot }, repoDir, { now: () => "2026-01-01T00:00:00.000Z", env });
 		} finally {
 			stderrSpy.mockRestore();
 		}
 
-		expect(exitCode).toBe(0);
-		expect(stderrOutput).toContain("could not be parsed");
-		expect(await readFile(configPath, "utf8")).toBe(damagedContent);
-	});
-
-	it("stays silent (no warning) when the existing file is valid", async () => {
-		const base = await makeTmpDir("gatekeeper-adopt-valid-skip-quiet-");
-		const repoDir = await makeGitRepo(base, "repo");
-		const { controlRoot } = await makeControlRepo(base);
-		await runAdopt({ control: controlRoot, repo: "acme/app" }, repoDir, { now: () => "2026-01-01T00:00:00.000Z" });
-
-		let stderrOutput = "";
-		const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(((chunk: string) => {
-			stderrOutput += String(chunk);
-			return true;
-		}) as typeof process.stderr.write);
-		let exitCode: number;
-		try {
-			exitCode = await runAdopt({ control: controlRoot, repo: "acme/app" }, repoDir, {
-				now: () => "2026-06-01T00:00:00.000Z",
-			});
-		} finally {
-			stderrSpy.mockRestore();
-		}
-
-		expect(exitCode).toBe(0);
-		expect(stderrOutput).not.toContain("could not be parsed");
+		expect(exitCode).toBe(2);
+		expect(stderrOutput).toContain("could not register control");
+		// The ordering fix (controls index first, repos.yaml second): a failed
+		// controls-index write must leave repos.yaml completely untouched, not
+		// merely "not yet containing this repo" -- the file must not exist at
+		// all, since makeControlRepo never wrote one and nothing before this
+		// point does either.
+		expect(await pathExists(path.join(registryDir, "repos.yaml"))).toBe(false);
+		expect(await loadRepos(registryDir)).toEqual([]);
 	});
 });

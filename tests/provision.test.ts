@@ -1,13 +1,36 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtempSync, rmSync } from "node:fs";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 
-import { runAdopt } from "../src/commands/adopt.js";
+import { type AdoptDependencies, runAdopt as runAdoptImpl } from "../src/commands/adopt.js";
 import { runProvision } from "../src/commands/provision.js";
+import { upsertControl } from "../src/config/controls.js";
 import { saveRepos } from "../src/config/repos.js";
+
+// `runAdopt` now also upserts the host-machine controls index (see
+// src/config/controls.ts) -- this file's own throwaway config dir keeps that
+// off the real ~/.config/gatekeeper/controls.yaml (see the identical pattern
+// and rationale in tests/init-control.test.ts).
+const controlsConfigDir = mkdtempSync(path.join(tmpdir(), "gatekeeper-provision-configdir-"));
+
+afterAll(() => {
+	rmSync(controlsConfigDir, { recursive: true, force: true });
+});
+
+async function runAdopt(
+	options: Parameters<typeof runAdoptImpl>[0],
+	cwd: string,
+	dependencies: AdoptDependencies = {},
+): Promise<number> {
+	return runAdoptImpl(options, cwd, {
+		...dependencies,
+		env: dependencies.env ?? { GATEKEEPER_CONFIG_DIR: controlsConfigDir },
+	});
+}
 
 async function pathExists(candidate: string): Promise<boolean> {
 	try {
@@ -418,5 +441,46 @@ describe("gatekeeper provision: real Git worktree checkout (T-20260719-03 R1 blo
 			const content = await readFile(commonDirHookPath, "utf8");
 			expect(content).toContain("#!/bin/sh");
 		}
+	});
+});
+
+describe("gatekeeper provision: hub self-discovery via the controls index (B2)", () => {
+	it("resolves --registry with zero flags from inside a control repo's own root (self-match)", async () => {
+		const base = await makeTmpDir("gatekeeper-provision-hub-selfdiscover-");
+		const { controlRoot, registryDir } = await makeControlRepo(base);
+		git(controlRoot, ["init", "-q"]);
+		git(controlRoot, ["remote", "add", "origin", "git@github.com:acme/hub.git"]);
+
+		const configDir = path.join(base, "config");
+		const env = { GATEKEEPER_CONFIG_DIR: configDir };
+		await upsertControl(
+			{
+				control: await realpath(controlRoot),
+				registry: await realpath(registryDir),
+				registered_at: "2026-07-19T00:00:00.000Z",
+			},
+			env,
+		);
+
+		const stdoutChunks: string[] = [];
+		const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(((chunk: string) => {
+			stdoutChunks.push(String(chunk));
+			return true;
+		}) as typeof process.stdout.write);
+
+		// No --registry at all -- must resolve entirely through the self-match
+		// branch of locateOwningControl (src/config/controls.ts). The roster is
+		// empty (a control repo never adopts itself), so a successful resolution
+		// looks like "0 repo(s)", not the exit-2 missing-registry error a failed
+		// self-match would produce.
+		let exitCode: number;
+		try {
+			exitCode = await runProvision({}, controlRoot, { env });
+		} finally {
+			stdoutSpy.mockRestore();
+		}
+
+		expect(exitCode).toBe(0);
+		expect(stdoutChunks.join("")).toContain("gatekeeper provision: 0 repo(s)");
 	});
 });

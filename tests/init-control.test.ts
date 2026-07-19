@@ -1,21 +1,58 @@
 import { execFileSync, spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { parse as parseYaml } from "yaml";
 
 import type { DetectedAgentCli } from "../src/agent/detect.js";
-import { runAdopt } from "../src/commands/adopt.js";
-import { type InitControlDependencies, runInitControl } from "../src/commands/init-control.js";
+import { type AdoptDependencies, runAdopt as runAdoptImpl } from "../src/commands/adopt.js";
+import { type InitControlDependencies, runInitControl as runInitControlImpl } from "../src/commands/init-control.js";
 import { loadRepos } from "../src/config/repos.js";
 import { ROLE_CARD_NAMES } from "../src/roles/cards.js";
 
 const repoRootDir = fileURLToPath(new URL("..", import.meta.url));
 const cliPath = path.join(repoRootDir, "src/cli.ts");
 const tsxLoader = path.join(repoRootDir, "node_modules/tsx/dist/loader.mjs");
+
+// Every runInitControl/runAdopt call below now also upserts the host-machine
+// controls index (~/.config/gatekeeper/controls.yaml by default) -- see
+// src/config/controls.ts. Tests must never touch the real one, so this file
+// creates one throwaway config dir up front (synchronously, so both the
+// async wrappers below and the sync runCli spawn can use it without a
+// promise) and threads it through every call site via the shadowing
+// wrappers immediately following this block (so none of the ~30 pre-existing
+// call sites need individual edits).
+const controlsConfigDir = mkdtempSync(path.join(tmpdir(), "gatekeeper-init-control-configdir-"));
+
+afterAll(() => {
+	rmSync(controlsConfigDir, { recursive: true, force: true });
+});
+
+async function runInitControl(
+	options: Parameters<typeof runInitControlImpl>[0],
+	cwd: string,
+	dependencies: InitControlDependencies = {},
+): Promise<number> {
+	return runInitControlImpl(options, cwd, {
+		...dependencies,
+		env: dependencies.env ?? { GATEKEEPER_CONFIG_DIR: controlsConfigDir },
+	});
+}
+
+async function runAdopt(
+	options: Parameters<typeof runAdoptImpl>[0],
+	cwd: string,
+	dependencies: AdoptDependencies = {},
+): Promise<number> {
+	return runAdoptImpl(options, cwd, {
+		...dependencies,
+		env: dependencies.env ?? { GATEKEEPER_CONFIG_DIR: controlsConfigDir },
+	});
+}
 
 interface RunResult {
 	status: number;
@@ -24,7 +61,11 @@ interface RunResult {
 }
 
 function runCli(cwd: string, args: string[]): RunResult {
-	const result = spawnSync(process.execPath, ["--import", tsxLoader, cliPath, ...args], { cwd, encoding: "utf8" });
+	const result = spawnSync(process.execPath, ["--import", tsxLoader, cliPath, ...args], {
+		cwd,
+		encoding: "utf8",
+		env: { ...process.env, GATEKEEPER_CONFIG_DIR: controlsConfigDir },
+	});
 	return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
 }
 
@@ -303,7 +344,8 @@ describe("gatekeeper init-control: connects to adopt", () => {
 		const adoptExitCode = await runAdopt({ control: controlRoot }, repoDir, { now: () => "2026-01-01T00:00:00.000Z" });
 		expect(adoptExitCode).toBe(0);
 
-		expect(await pathExists(path.join(repoDir, ".gatekeeper.yml"))).toBe(true);
+		// adopt is zero-touch: no file is written into the target repo.
+		expect(await pathExists(path.join(repoDir, ".gatekeeper.yml"))).toBe(false);
 		const registryDir = path.join(controlRoot, "governance", "registry");
 		const repos = await loadRepos(registryDir);
 		expect(repos).toHaveLength(1);

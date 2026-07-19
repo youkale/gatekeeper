@@ -1,6 +1,13 @@
+import { execFileSync } from "node:child_process";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { aggregateStats, parseLedgerComments, parseLedgerJsonl, runStats } from "../src/commands/stats.js";
+import { upsertControl } from "../src/config/controls.js";
+import { saveRepos } from "../src/config/repos.js";
 import type { GitHubFetch } from "../src/providers/github.js";
 import { COMMENT_MARKER, type GatekeeperLedger } from "../src/render/comment.js";
 
@@ -146,19 +153,30 @@ describe("stats aggregation", () => {
 		const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
 		vi.spyOn(process.stderr, "write").mockImplementation(() => true);
 
-		const exitCode = await runStats({ source: "github", repo: "acme/app", token: "token", json: true }, "/workspace", {
-			fetch: fetchMock as unknown as GitHubFetch,
-			env: { GITHUB_API_URL: "https://api.github.test" },
-		});
+		// A real (but non-git) directory, not the literal nonexistent path
+		// "/workspace" this test used before (C1): `repo` is given explicitly
+		// so cwd's own git-root resolution is irrelevant to this test's
+		// assertions, but it must still be a *real* directory -- a nonexistent
+		// one now correctly classifies as a git "infra" failure (not "confirmed
+		// not a repo"), which is fail-loud for a tool-mode command like stats.
+		const cwd = await mkdtemp(path.join(tmpdir(), "gatekeeper-stats-cwd-"));
+		try {
+			const exitCode = await runStats({ source: "github", repo: "acme/app", token: "token", json: true }, cwd, {
+				fetch: fetchMock as unknown as GitHubFetch,
+				env: { GITHUB_API_URL: "https://api.github.test" },
+			});
 
-		expect(exitCode).toBe(0);
-		expect(fetchMock).toHaveBeenCalledTimes(3);
-		const report = JSON.parse(stdout.mock.calls.map(([message]) => String(message)).join("")) as Record<
-			string,
-			unknown
-		>;
-		expect(report).toMatchObject({ totalPrs: 2, matchedPrs: 1, hitRate: 0.5, rounds: 1 });
-		expect(report.unparsable).toHaveLength(1);
+			expect(exitCode).toBe(0);
+			expect(fetchMock).toHaveBeenCalledTimes(3);
+			const report = JSON.parse(stdout.mock.calls.map(([message]) => String(message)).join("")) as Record<
+				string,
+				unknown
+			>;
+			expect(report).toMatchObject({ totalPrs: 2, matchedPrs: 1, hitRate: 0.5, rounds: 1 });
+			expect(report.unparsable).toHaveLength(1);
+		} finally {
+			await rm(cwd, { recursive: true, force: true });
+		}
 	});
 
 	it("keeps valid REST comments when another envelope on the page is malformed", async () => {
@@ -183,26 +201,117 @@ describe("stats aggregation", () => {
 		const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
 		vi.spyOn(process.stderr, "write").mockImplementation(() => true);
 
-		const exitCode = await runStats({ source: "github", repo: "acme/app", json: true }, "/workspace", {
-			fetch: fetchMock as unknown as GitHubFetch,
-			env: { GITHUB_API_URL: "https://api.github.test" },
-		});
+		// See the identical rationale in the previous test: a real (but
+		// non-git) directory, not the nonexistent literal "/workspace".
+		const cwd = await mkdtemp(path.join(tmpdir(), "gatekeeper-stats-cwd-"));
+		try {
+			const exitCode = await runStats({ source: "github", repo: "acme/app", json: true }, cwd, {
+				fetch: fetchMock as unknown as GitHubFetch,
+				env: { GITHUB_API_URL: "https://api.github.test" },
+			});
 
-		expect(exitCode).toBe(0);
-		const report = JSON.parse(stdout.mock.calls.map(([message]) => String(message)).join("")) as {
-			rounds: number;
-			unparsable: Array<Record<string, unknown>>;
-		};
-		expect(report.rounds).toBe(2);
-		expect(report.unparsable).toEqual([
-			{
-				pr: 7,
-				commentId: 702,
-				line: null,
-				page: 1,
-				itemIndex: 1,
-				reason: "GitHub comments response item 1 is malformed",
-			},
-		]);
+			expect(exitCode).toBe(0);
+			const report = JSON.parse(stdout.mock.calls.map(([message]) => String(message)).join("")) as {
+				rounds: number;
+				unparsable: Array<Record<string, unknown>>;
+			};
+			expect(report.rounds).toBe(2);
+			expect(report.unparsable).toEqual([
+				{
+					pr: 7,
+					commentId: 702,
+					line: null,
+					page: 1,
+					itemIndex: 1,
+					reason: "GitHub comments response item 1 is malformed",
+				},
+			]);
+		} finally {
+			await rm(cwd, { recursive: true, force: true });
+		}
+	});
+});
+
+function git(cwd: string, args: string[]): string {
+	return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
+}
+
+describe("stats: --source github falls back to the origin remote after a self-match discovery (B7)", () => {
+	it("resolves repo via git remote origin with zero --repo, inside a hub's own root (self-match, no repos.yaml entry)", async () => {
+		const base = await mkdtemp(path.join(tmpdir(), "gatekeeper-stats-selfmatch-"));
+		try {
+			const hubRoot = path.join(base, "hub");
+			await mkdir(hubRoot, { recursive: true });
+			git(hubRoot, ["init", "-q"]);
+			git(hubRoot, ["symbolic-ref", "HEAD", "refs/heads/main"]);
+			git(hubRoot, ["remote", "add", "origin", "git@github.com:acme/app.git"]);
+
+			const registryDir = path.join(hubRoot, "governance", "registry");
+			await mkdir(path.join(registryDir, "contracts"), { recursive: true });
+			await writeFile(
+				path.join(registryDir, "policy.yaml"),
+				"apiVersion: gatekeeper/v1\nlanes: {}\nlevels:\n  notify:\n    enforcement: warn\n    require: {}\n",
+				"utf8",
+			);
+			await saveRepos(registryDir, []); // a control repo never adopts itself
+
+			const configDir = path.join(base, "config");
+			const env = { GATEKEEPER_CONFIG_DIR: configDir, GITHUB_API_URL: "https://api.github.test" };
+			await upsertControl(
+				{
+					control: await realpath(hubRoot),
+					registry: await realpath(registryDir),
+					registered_at: "2026-07-20T00:00:00.000Z",
+				},
+				env,
+			);
+
+			const fetchMock = vi.fn(async (input: string | URL | Request) => {
+				const url = String(input);
+				if (url.includes("/pulls?")) {
+					return new Response(JSON.stringify([]));
+				}
+				throw new Error(`unexpected URL ${url}`);
+			});
+			const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+			// No --repo, no .gatekeeper.yml -- must resolve entirely through the
+			// self-match branch of locateOwningControl (registry only, no repo
+			// identity) plus resolveRepo's origin-remote auto-detection.
+			const exitCode = await runStats({ source: "github", json: true }, hubRoot, {
+				fetch: fetchMock as unknown as GitHubFetch,
+				env,
+			});
+
+			expect(exitCode).toBe(0);
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+			expect(String(fetchMock.mock.calls[0]?.[0])).toContain("/repos/acme/app/pulls");
+			const report = JSON.parse(stdout.mock.calls.map(([message]) => String(message)).join("")) as {
+				totalPrs: number;
+			};
+			expect(report.totalPrs).toBe(0);
+		} finally {
+			await rm(base, { recursive: true, force: true });
+		}
+	});
+
+	it("does not attempt origin-remote fallback for --source local (never needs a repo)", async () => {
+		const base = await mkdtemp(path.join(tmpdir(), "gatekeeper-stats-local-norepo-"));
+		try {
+			// Not even a git repo -- --source local must not care.
+			const fetchMock = vi.fn(async () => {
+				throw new Error("must not fetch for --source local");
+			});
+
+			const exitCode = await runStats({ source: "local", file: "does-not-exist.jsonl" }, base, {
+				fetch: fetchMock as unknown as GitHubFetch,
+			});
+
+			// Fails for the expected reason (missing ledger file), not a repo-resolution error.
+			expect(exitCode).toBe(2);
+			expect(fetchMock).not.toHaveBeenCalled();
+		} finally {
+			await rm(base, { recursive: true, force: true });
+		}
 	});
 });

@@ -1,6 +1,6 @@
 import {
 	ConfigDiscoveryError,
-	discoverConfig,
+	discoverConfigWithControlsIndex,
 	missingRegistryMessage,
 	resolveConfiguredField,
 	resolveRegistryOption,
@@ -31,6 +31,11 @@ export interface CheckOptions {
 	explain?: boolean;
 	actor?: string;
 	strictInfra?: boolean;
+}
+
+export interface CheckDependencies {
+	/** Process (or injected) environment; forwarded to config discovery's controls-index fallback (only GATEKEEPER_CONFIG_DIR is consulted -- see src/config/controls.ts). */
+	env?: NodeJS.ProcessEnv;
 }
 
 function describeCheckError(error: unknown): string {
@@ -66,13 +71,23 @@ function degrade(reason: string, options: CheckOptions): number {
 	return options.strictInfra ? 2 : 0;
 }
 
-export async function runCheck(options: CheckOptions, cwd: string): Promise<number> {
-	// Config discovery (.gatekeeper.yml) is infrastructure like the registry/git
-	// providers below: a damaged config file degrades (fail-open) rather than
-	// blocking, same as a damaged registry directory.
-	let discovered: Awaited<ReturnType<typeof discoverConfig>>;
+export async function runCheck(
+	options: CheckOptions,
+	cwd: string,
+	dependencies: CheckDependencies = {},
+): Promise<number> {
+	// Config discovery (.gatekeeper.yml, falling back to the user-level controls
+	// index -- see src/config/discover.ts's discoverConfigWithControlsIndex) is
+	// infrastructure like the registry/git providers below: a damaged config
+	// file degrades (fail-open) rather than blocking, same as a damaged
+	// registry directory.
+	let discovered: Awaited<ReturnType<typeof discoverConfigWithControlsIndex>>["discovered"];
 	try {
-		discovered = await discoverConfig(cwd);
+		const result = await discoverConfigWithControlsIndex(cwd, { mode: "gate", env: dependencies.env });
+		discovered = result.discovered;
+		for (const warning of result.warnings) {
+			process.stderr.write(`warning: ${warning}\n`);
+		}
 	} catch (error) {
 		return degrade(describeCheckError(error), options);
 	}

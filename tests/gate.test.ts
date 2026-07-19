@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -10,9 +11,15 @@ import {
 	resolveOverrideActor,
 	runGate,
 } from "../src/commands/gate.js";
+import { upsertControl } from "../src/config/controls.js";
+import { saveRepos } from "../src/config/repos.js";
 import type { GitHubIssueComment, GitHubLabel, GitHubPullRequestReview } from "../src/providers/github.js";
 import { InfraError } from "../src/providers/github.js";
 import { COMMENT_MARKER } from "../src/render/comment.js";
+
+function git(cwd: string, args: string[]): string {
+	return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
+}
 
 const overrideLabel = "gatekeeper:override";
 
@@ -380,3 +387,140 @@ describe("override attribution", () => {
 		}
 	});
 });
+
+describe("gate: controls-index reverse discovery (B5 env threading + B1 fail-direction)", () => {
+	let base: string | undefined;
+
+	afterEach(async () => {
+		if (base) {
+			await rm(base, { recursive: true, force: true });
+			base = undefined;
+		}
+	});
+
+	it("resolves --registry/--repo via an injected GATEKEEPER_CONFIG_DIR controls index, with zero flags", async () => {
+		base = await mkdtemp(path.join(tmpdir(), "gatekeeper-gate-controls-index-"));
+		const configDir = path.join(base, "config");
+		const env = { GATEKEEPER_CONFIG_DIR: configDir };
+
+		const registryDir = path.join(base, "registry");
+		await mkdir(registryDir, { recursive: true });
+		await writeGateRegistry(registryDir);
+
+		const repoDir = path.join(base, "repo");
+		await mkdir(repoDir, { recursive: true });
+		git(repoDir, ["init", "-q"]);
+		git(repoDir, ["symbolic-ref", "HEAD", "refs/heads/main"]);
+		await writeFile(path.join(repoDir, "README.md"), "hello\n", "utf8");
+		git(repoDir, ["add", "-A"]);
+		git(repoDir, ["-c", "user.email=gate@example.com", "-c", "user.name=Gate Bot", "commit", "-q", "-m", "init"]);
+		const repoRealPath = await realpath(repoDir);
+
+		await saveRepos(registryDir, [
+			{ repo: "acme/app", path: repoRealPath, ci: "none", adopted_at: "2026-07-18T00:00:00.000Z" },
+		]);
+		await upsertControl(
+			{ control: path.join(base, "control"), registry: registryDir, registered_at: "2026-07-18T00:00:00.000Z" },
+			env,
+		);
+		await mkdir(path.join(base, "control"), { recursive: true });
+
+		const provider = providerFixture();
+		let repoPassedToProvider: string | undefined;
+		const createProvider: NonNullable<GateDependencies["createProvider"]> = (options) => {
+			repoPassedToProvider = options.repo;
+			return provider.createProvider(options);
+		};
+
+		// No `registry`/`repo` in options at all -- must resolve entirely through
+		// the injected controls index, proving `env` is actually threaded into
+		// discoverConfigWithControlsIndex rather than silently falling back to
+		// the real process.env (which has no such entry).
+		const exitCode = await runGate({ pr: 7 }, repoDir, {
+			createProvider,
+			now: () => "2026-07-18T10:03:00Z",
+			env,
+		});
+
+		expect(repoPassedToProvider).toBe("acme/app");
+		expect(exitCode).toBe(1); // human-required lane unmet -> block, same as the zero-evidence baseline
+	});
+
+	it("(C1) degrades (exit 0, GATEKEEPER DEGRADED) instead of blocking when resolving the Git root hits a non-'not-a-worktree' git failure", async () => {
+		base = await mkdtemp(path.join(tmpdir(), "gatekeeper-gate-c1-infra-"));
+		// A cwd git can't even chdir into (exit 128, "cannot change to ...", not
+		// "not a git repository") is classified `kind: "infra"` by
+		// resolveRepoRoot (src/providers/gitdiff.ts) -- deterministic and
+		// portable, unlike permission-based repros (see this file's B1 test for
+		// the identical rationale for the sibling realpath failure).
+		const missingDir = path.join(base, "does-not-exist-at-all");
+
+		let stderrOutput = "";
+		const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(((chunk: string) => {
+			stderrOutput += String(chunk);
+			return true;
+		}) as typeof process.stderr.write);
+		let exitCode: number;
+		try {
+			exitCode = await runGate({ pr: 7 }, missingDir, {
+				createProvider: () => {
+					throw new Error("must not reach a GitHub provider call -- discovery should fail before this point");
+				},
+			});
+		} finally {
+			stderrSpy.mockRestore();
+		}
+
+		expect(exitCode).toBe(0);
+		expect(stderrOutput).toContain("GATEKEEPER DEGRADED");
+	});
+
+	it("(C2) degrades (exit 0, GATEKEEPER DEGRADED) instead of a silent missing-registry exit 2 when a stale controls-index entry is the sole reason no match is found", async () => {
+		base = await mkdtemp(path.join(tmpdir(), "gatekeeper-gate-c2-stale-"));
+		const configDir = path.join(base, "config");
+		const env = { GATEKEEPER_CONFIG_DIR: configDir };
+		const repoDir = path.join(base, "repo");
+		await mkdir(repoDir, { recursive: true });
+		git(repoDir, ["init", "-q"]);
+		git(repoDir, ["symbolic-ref", "HEAD", "refs/heads/main"]);
+
+		// A control root that was never actually created on disk (stale) --
+		// there is no other, non-stale index entry that could otherwise match.
+		await upsertControl(
+			{
+				control: path.join(base, "ghost-control"),
+				registry: path.join(base, "ghost-control", "registry"),
+				registered_at: "2026-07-20T00:00:00.000Z",
+			},
+			env,
+		);
+
+		let stderrOutput = "";
+		const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(((chunk: string) => {
+			stderrOutput += String(chunk);
+			return true;
+		}) as typeof process.stderr.write);
+		let exitCode: number;
+		try {
+			exitCode = await runGate({ pr: 7 }, repoDir, {
+				createProvider: () => {
+					throw new Error("must not reach a GitHub provider call -- discovery should fail before this point");
+				},
+				env,
+			});
+		} finally {
+			stderrSpy.mockRestore();
+		}
+
+		expect(exitCode).toBe(0);
+		expect(stderrOutput).toContain("GATEKEEPER DEGRADED");
+		expect(stderrOutput).toContain("no longer exists");
+	});
+});
+
+// B1's fail-direction regression (a non-GitDiffError failure resolving the
+// controls-index's Git-root realpath must degrade gate/check, not fail
+// closed) is covered end-to-end -- through this exact runGate call site --
+// by tests/discover-realpath-failure.test.ts, which injects a deterministic
+// fs.realpath failure via vi.mock rather than depending on real filesystem
+// permission semantics (fragile and root-bypassed in CI containers).

@@ -7,7 +7,8 @@ import { AgentTimeoutRangeError, resolveAgentCommand } from "../agent/resolve.js
 import { AgentRunError, runAgentCommand } from "../agent/runner.js";
 import {
 	ConfigDiscoveryError,
-	discoverConfig,
+	type DiscoveredConfig,
+	discoverConfigWithControlsIndex,
 	MAX_AGENT_TIMEOUT_SECONDS,
 	missingAgentMessage,
 	resolveRegistryOption,
@@ -28,6 +29,11 @@ export interface InitOptions {
 	agentTimeout?: number;
 }
 
+export interface InitDependencies {
+	/** Process (or injected) environment; forwarded to config discovery's controls-index fallback (only GATEKEEPER_CONFIG_DIR is consulted there -- see src/config/controls.ts). */
+	env?: NodeJS.ProcessEnv;
+}
+
 /**
  * Resolve the registry-drafter role card path to point the printed next-step
  * hint at: `init` consumes no `.gatekeeper.yml` field of its own, but a
@@ -40,7 +46,7 @@ export interface InitOptions {
  * to the literal fallback path rather than failing the whole command over a
  * printed hint.
  */
-function resolveRegistryDrafterCardPath(discovered: Awaited<ReturnType<typeof discoverConfig>>): string {
+function resolveRegistryDrafterCardPath(discovered: DiscoveredConfig | null): string {
 	try {
 		return resolveRoleCardPath("registry-drafter", resolveRegistryOption({ discovered }));
 	} catch (error) {
@@ -80,15 +86,19 @@ function renderRunInstructions(draftDir: string): string {
  * fail open with an empty brief -- there is no downstream policy decision to protect
  * from an infrastructure hiccup here, only a human about to be handed misleading output.
  */
-export async function runInit(options: InitOptions, cwd: string): Promise<number> {
+export async function runInit(options: InitOptions, cwd: string, dependencies: InitDependencies = {}): Promise<number> {
 	// `init` consumes no .gatekeeper.yml field (it has no --registry/--repo/--base/--actor
 	// equivalent — it drafts a registry, it doesn't consume one), but config discovery
-	// still runs here for the same fail-loud reason as validate/doctor/triage: a damaged
-	// config file nearby is worth surfacing loudly to a local-authoring tool rather than
-	// silently ignoring it.
-	let discovered: Awaited<ReturnType<typeof discoverConfig>>;
+	// (including the user-level controls index fallback) still runs here for the same
+	// fail-loud reason as validate/doctor/triage: a damaged config file nearby is worth
+	// surfacing loudly to a local-authoring tool rather than silently ignoring it.
+	let discovered: DiscoveredConfig | null;
 	try {
-		discovered = await discoverConfig(cwd);
+		const result = await discoverConfigWithControlsIndex(cwd, { mode: "tool", env: dependencies.env });
+		discovered = result.discovered;
+		for (const discoveryWarning of result.warnings) {
+			process.stderr.write(`warning: ${discoveryWarning}\n`);
+		}
 	} catch (error) {
 		if (!(error instanceof ConfigDiscoveryError)) {
 			throw error;

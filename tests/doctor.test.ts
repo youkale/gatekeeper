@@ -1,4 +1,5 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -7,6 +8,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { AgentsFileReadError } from "../src/agent/agentsFile.js";
 import type { DetectedAgentCli } from "../src/agent/detect.js";
 import { agentsCapabilityCheck, rolesPolicyCapabilityCheck, runDoctor } from "../src/commands/doctor.js";
+import { upsertControl } from "../src/config/controls.js";
+import { saveRepos } from "../src/config/repos.js";
 
 describe("doctor fail direction and required checks", () => {
 	let registryDirectory: string;
@@ -368,6 +371,61 @@ levels: {}
 			);
 		} finally {
 			await rm(invalidRegistry, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("doctor: hub self-discovery via the controls index (B2)", () => {
+	it("resolves --registry with zero flags from inside a control repo's own root (self-match, no repos.yaml entry needed)", async () => {
+		const base = await mkdtemp(path.join(tmpdir(), "gatekeeper-doctor-hub-selfdiscover-"));
+		try {
+			const hubRoot = path.join(base, "hub");
+			await mkdir(hubRoot, { recursive: true });
+			execFileSync("git", ["-C", hubRoot, "init", "-q"]);
+			execFileSync("git", ["-C", hubRoot, "symbolic-ref", "HEAD", "refs/heads/main"]);
+			execFileSync("git", ["-C", hubRoot, "remote", "add", "origin", "git@github.com:acme/hub.git"]);
+
+			const registryDir = path.join(hubRoot, "governance", "registry");
+			await mkdir(registryDir, { recursive: true });
+			await writeFile(
+				path.join(registryDir, "policy.yaml"),
+				"apiVersion: gatekeeper/v1\nlanes: {}\nlevels:\n  notify:\n    enforcement: warn\n    require: {}\n",
+				"utf8",
+			);
+			await saveRepos(registryDir, []); // a control repo never adopts itself into its own roster
+
+			const configDir = path.join(base, "config");
+			const env = { GATEKEEPER_CONFIG_DIR: configDir };
+			await upsertControl(
+				{
+					control: await realpath(hubRoot),
+					registry: await realpath(registryDir),
+					registered_at: "2026-07-19T00:00:00.000Z",
+				},
+				env,
+			);
+
+			vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+			vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+			const createProvider = vi.fn(() => {
+				throw new Error("provider must not be called -- no --branch/--check-name requested");
+			});
+
+			// Zero flags: no --registry, no --repo, no .gatekeeper.yml anywhere --
+			// must resolve entirely through the self-match branch of
+			// locateOwningControl (src/config/controls.ts).
+			const exitCode = await runDoctor({ workflow: path.join(hubRoot, "missing-workflow.yml") }, hubRoot, {
+				createProvider,
+				env,
+			});
+
+			// "无法校验 workflow" (fail-open warning for a missing workflow path) is
+			// the expected downstream outcome once the registry actually resolved
+			// -- exit 0, not the exit-2 missing-registry error this would produce
+			// if self-match discovery had failed.
+			expect(exitCode).toBe(0);
+		} finally {
+			await rm(base, { recursive: true, force: true });
 		}
 	});
 });

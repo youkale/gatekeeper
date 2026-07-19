@@ -1,6 +1,6 @@
 import {
 	ConfigDiscoveryError,
-	discoverConfig,
+	discoverConfigWithControlsIndex,
 	missingRegistryMessage,
 	resolveRegistryOption,
 } from "../config/discover.js";
@@ -26,6 +26,8 @@ export interface ValidateOptions {
 	 */
 	stdout?: (chunk: string) => void;
 	stderr?: (chunk: string) => void;
+	/** Process (or injected) environment; forwarded to config discovery's controls-index fallback (only GATEKEEPER_CONFIG_DIR is consulted -- see src/config/controls.ts). Optional and additive, same posture as stdout/stderr above. */
+	env?: NodeJS.ProcessEnv;
 }
 
 function isBareDoubleStar(glob: string): boolean {
@@ -85,19 +87,26 @@ export async function runValidate(options: ValidateOptions, cwd: string = proces
 	const writeStdout = options.stdout ?? ((chunk: string) => void process.stdout.write(chunk));
 	const writeStderr = options.stderr ?? ((chunk: string) => void process.stderr.write(chunk));
 
-	// Config discovery (.gatekeeper.yml) is a local-authoring-command input like
-	// the registry directory itself: validate fails loud (exit 2) on damage
-	// instead of degrading, unlike check/gate.
-	const discovered = await discoverConfig(cwd).catch((error: unknown) => {
-		if (error instanceof ConfigDiscoveryError) {
-			writeStderr(`gatekeeper validate: ${error.reason}\n`);
-			return "invalid" as const;
-		}
-		throw error;
-	});
-	if (discovered === "invalid") {
+	// Config discovery (.gatekeeper.yml, falling back to the user-level controls
+	// index) is a local-authoring-command input like the registry directory
+	// itself: validate fails loud (exit 2) on damage instead of degrading,
+	// unlike check/gate.
+	const discoveryResult = await discoverConfigWithControlsIndex(cwd, { mode: "tool", env: options.env }).catch(
+		(error: unknown) => {
+			if (error instanceof ConfigDiscoveryError) {
+				writeStderr(`gatekeeper validate: ${error.reason}\n`);
+				return "invalid" as const;
+			}
+			throw error;
+		},
+	);
+	if (discoveryResult === "invalid") {
 		return 2;
 	}
+	for (const discoveryWarning of discoveryResult.warnings) {
+		writeStderr(`warning: ${discoveryWarning}\n`);
+	}
+	const discovered = discoveryResult.discovered;
 	const registryPath = resolveRegistryOption({ cliValue: options.registry, discovered });
 	if (!registryPath) {
 		writeStderr(`${missingRegistryMessage("validate")}\n`);

@@ -475,8 +475,9 @@ describe("Action fail-open/fail-closed boundary", () => {
 			},
 		});
 
+		const actionEnv = eventEnvironment({ INPUT_MODE: "check", INPUT_ENFORCE: "soft" });
 		const exitCode = await runAction({
-			env: eventEnvironment({ INPUT_MODE: "check", INPUT_ENFORCE: "soft" }),
+			env: actionEnv,
 			readFile: eventReader({ pull_request: { number: 42, base: { sha: "base" } } }),
 			runCheck,
 			createProvider,
@@ -484,7 +485,13 @@ describe("Action fail-open/fail-closed boundary", () => {
 		});
 
 		expect(exitCode).toBe(0);
-		expect(runCheck).toHaveBeenCalledWith(expect.objectContaining({ base: "base", json: true }), expect.any(String));
+		// (C4) Symmetric with gate mode's own runGate assertion above: the
+		// Action's own `env` is threaded through as a third argument now, not
+		// just (options, cwd) -- and it's the *same* env object the Action
+		// itself was given, not some other/partial one.
+		expect(runCheck).toHaveBeenCalledWith(expect.objectContaining({ base: "base", json: true }), expect.any(String), {
+			env: actionEnv,
+		});
 		expect(writtenComment).toContain("<!-- gatekeeper:verdict -->");
 		expect(writtenComment).toContain("```json gatekeeper-ledger");
 	});

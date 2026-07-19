@@ -13,11 +13,24 @@ import type { ChangedFile, ChangeStatus, Contract } from "../engine/types.js";
 
 export class GitDiffError extends Error {
 	readonly reason: string;
+	/**
+	 * Optional, additive classification -- `undefined` at every pre-existing
+	 * throw site (unchanged behavior for any caller that only pattern-matches
+	 * on `instanceof GitDiffError`). Currently only set by `resolveRepoRoot`,
+	 * to let callers distinguish a *confirmed* "cwd is not inside a Git
+	 * working tree" result (`"not-a-worktree"`) from every other git-command
+	 * failure (`"infra"`: spawn failure, permission error, unexpected exit
+	 * code, ...) -- the two need opposite fail-direction handling wherever a
+	 * caller today treats "git says no" as "this feature doesn't apply here"
+	 * (see src/config/discover.ts's discoverConfigWithControlsIndex).
+	 */
+	readonly kind?: "not-a-worktree" | "infra";
 
-	constructor(reason: string, options?: { cause?: unknown }) {
+	constructor(reason: string, options?: { cause?: unknown; kind?: "not-a-worktree" | "infra" }) {
 		super(reason);
 		this.name = "GitDiffError";
 		this.reason = reason;
+		this.kind = options?.kind;
 		if (options?.cause !== undefined) {
 			this.cause = options.cause;
 		}
@@ -139,16 +152,34 @@ export async function resolveRepo(cwd: string, explicitRepo?: string): Promise<s
 	return parsed;
 }
 
+/** Git's own confirmation, on stderr, that `cwd` is not inside a working tree at all -- as opposed to any other reason `git rev-parse` could fail (spawn failure, permissions, corrupt repo, ...). */
+const NOT_A_GIT_REPOSITORY = /not a git repository/i;
+
 /**
  * Resolve the repository's working-tree root (`git rev-parse --show-toplevel`).
  * Used by `gatekeeper adopt`, which writes `.gatekeeper.yml`/AGENTS.md/CI
  * config/hooks at the repo root regardless of the subdirectory it is invoked
- * from. Throws GitDiffError when `cwd` is not inside a Git working tree.
+ * from. Throws `GitDiffError` on any failure -- `kind: "not-a-worktree"` only
+ * when git itself confirms `cwd` is not inside a working tree (exit 128,
+ * "not a git repository" on stderr); every other failure (the git binary
+ * couldn't even be spawned, a permissions problem, an unexpected exit code,
+ * ...) is `kind: "infra"` -- a real infrastructure fault a caller must not
+ * treat the same as "this repo just isn't adopted/git-tracked" (see
+ * GitDiffError's own doc comment for why this distinction exists).
  */
 export async function resolveRepoRoot(cwd: string): Promise<string> {
 	const result = await execGit(cwd, ["rev-parse", "--show-toplevel"]);
 	if (result.code !== 0) {
-		throw new GitDiffError(`not a Git working tree (git rev-parse --show-toplevel failed): ${result.stderr.trim()}`);
+		const trimmedStderr = result.stderr.trim();
+		if (result.code === 128 && NOT_A_GIT_REPOSITORY.test(trimmedStderr)) {
+			throw new GitDiffError(`not a Git working tree (git rev-parse --show-toplevel failed): ${trimmedStderr}`, {
+				kind: "not-a-worktree",
+			});
+		}
+		throw new GitDiffError(
+			`git rev-parse --show-toplevel failed (exit ${result.code}): ${trimmedStderr || "no error output"}`,
+			{ kind: "infra" },
+		);
 	}
 	return result.stdout.trim();
 }

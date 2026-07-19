@@ -8,7 +8,7 @@ import { AgentsFileParseError, AgentsFileReadError, loadAgentsFile, locateAgents
 import { detectAgentClis } from "../agent/detect.js";
 import {
 	ConfigDiscoveryError,
-	discoverConfig,
+	discoverConfigWithControlsIndex,
 	missingRegistryMessage,
 	resolveConfiguredField,
 	resolveRegistryOption,
@@ -377,6 +377,8 @@ export interface AgentsCapabilityOptions {
 	detect?: typeof detectAgentClis;
 	/** Injectable governance/agents.yaml loader (defaults to loadAgentsFile) -- tests use this to simulate a read failure (e.g. EACCES) without depending on real filesystem permission semantics. */
 	loadAgentsFile?: typeof loadAgentsFile;
+	/** Process (or injected) environment; forwarded to this check's own independent config discovery (only GATEKEEPER_CONFIG_DIR is consulted, via the controls index -- see src/config/controls.ts). */
+	env?: NodeJS.ProcessEnv;
 }
 
 /**
@@ -390,7 +392,7 @@ export interface AgentsCapabilityOptions {
  * `gatekeeper init-control` -- most repos never need one (tiers 1/2 of the
  * BYO agent resolution chain cover them), so this must never be a warning.
  *
- * Registry resolution is self-contained (its own discoverConfig +
+ * Registry resolution is self-contained (its own discoverConfigWithControlsIndex +
  * resolveRegistryOption call) rather than threaded through from runDoctor's
  * own resolution, mirroring rolesPolicyCapabilityCheck's independent
  * resolveRolesPolicyPath call -- capability checks are composed as
@@ -401,12 +403,13 @@ export function agentsCapabilityCheck(cwd: string, options: AgentsCapabilityOpti
 	return {
 		name: "agents",
 		run: async (): Promise<DoctorCapabilityResult> => {
-			let discovered: Awaited<ReturnType<typeof discoverConfig>>;
+			let discovered: Awaited<ReturnType<typeof discoverConfigWithControlsIndex>>["discovered"];
 			try {
-				discovered = await discoverConfig(cwd);
+				discovered = (await discoverConfigWithControlsIndex(cwd, { mode: "tool", env: options.env })).discovered;
 			} catch {
-				// A damaged .gatekeeper.yml is already surfaced fail-loud by runDoctor's own
-				// discoverConfig call -- this advisory check has nothing useful to add.
+				// A damaged .gatekeeper.yml/controls index is already surfaced fail-loud by
+				// runDoctor's own discoverConfigWithControlsIndex call -- this advisory check
+				// has nothing useful to add.
 				return {};
 			}
 			const registryPath = resolveRegistryOption({ cliValue: options.registryOverride, discovered });
@@ -459,12 +462,23 @@ export async function runDoctor(
 	cwd: string,
 	dependencies: DoctorDependencies = {},
 ): Promise<number> {
-	// Config discovery (.gatekeeper.yml) is a local-authoring-command input like
-	// the registry directory itself: doctor fails loud on damage (same failure()
-	// + exit 1 treatment as a broken registry), not the check/gate degrade path.
-	let discovered: Awaited<ReturnType<typeof discoverConfig>>;
+	// Computed up front (not just before the GITHUB_REPOSITORY fallback further
+	// down) so the controls-index discovery call right below also honors an
+	// injected environment -- same env, one source of truth, threaded through
+	// every place this function reads process.env.
+	const env = dependencies.env ?? process.env;
+
+	// Config discovery (.gatekeeper.yml, falling back to the user-level controls
+	// index) is a local-authoring-command input like the registry directory
+	// itself: doctor fails loud on damage (same failure() + exit 1 treatment as
+	// a broken registry), not the check/gate degrade path.
+	let discovered: Awaited<ReturnType<typeof discoverConfigWithControlsIndex>>["discovered"];
 	try {
-		discovered = await discoverConfig(cwd);
+		const result = await discoverConfigWithControlsIndex(cwd, { mode: "tool", env });
+		discovered = result.discovered;
+		for (const discoveryWarning of result.warnings) {
+			warning(discoveryWarning);
+		}
 	} catch (error) {
 		if (error instanceof ConfigDiscoveryError) {
 			failure(error.reason);
@@ -532,7 +546,6 @@ export async function runDoctor(
 		}
 	}
 
-	const env = dependencies.env ?? process.env;
 	try {
 		const repo = await resolveRepo(
 			cwd,

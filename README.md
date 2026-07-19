@@ -75,7 +75,7 @@ Unlike `repos.yaml`, `governance/agents.yaml` **is** a regenerable template: it 
 
 ### 2. Adopt each repo, once
 
-`gatekeeper adopt` locates the registry inside a **control** (hub) checkout — the directory that has your registry checked out, typically at `governance/registry` or `registry` — and registers one **target** repo against it: it writes a minimal `.gatekeeper.yml` at the target repo's root and upserts that repo's entry into `<registry>/repos.yaml`.
+`gatekeeper adopt` locates the registry inside a **control** (hub) checkout — the directory that has your registry checked out, typically at `governance/registry` or `registry` — and registers one **target** repo against it. **Adopt is zero-touch on the target repo: it never writes to or modifies any file inside it** (it does read a couple of marker files there — `.gitlab-ci.yml` / `.github/workflows` — purely to auto-detect the CI provider for the roster entry below). It upserts that repo's entry into `<registry>/repos.yaml` and registers the control/registry pair in this machine's user-level controls index (`~/.config/gatekeeper/controls.yaml`, overridable via `GATEKEEPER_CONFIG_DIR` — see [src/config/controls.ts](src/config/controls.ts)):
 
 ```bash
 # from inside the repo you're adopting (or pass its path as the last argument)
@@ -84,22 +84,22 @@ gatekeeper adopt --control /work/governance-hub
 
 `--control` is probed in order for a `policy.yaml`: `<control>/governance/registry`, then `<control>/registry`, then `<control>` itself. A target repo may not be identical to, contain, or be nested inside the control repo — a control repo governs itself through its own self-gate workflow, not through `adopt`.
 
-`.gatekeeper.yml` (written at the target repo root):
+Every other command resolves `--registry`/`--repo`/`--base`/`--actor` in this order: an explicit CLI flag; then (registry only) the `GATEKEEPER_REGISTRY` environment variable; then an explicit `.gatekeeper.yml` found by walking up from the current directory (stopping at the Git root); then, when no `.gatekeeper.yml` is found and the current directory is a Git working tree, reverse lookup through the controls index (find this repo's root in whichever registered control's `repos.yaml` claims it); finally each command's own prior default (e.g. `check`'s local `main`/`master` auto-detection). Adopting a repo is therefore enough on its own for every other command to work with zero flags from inside it — no file needs to exist there at all. Both `repos.yaml` and the controls index hold host-local paths (the checkout path on *this* machine), so a fresh `git clone` of either the target repo or the control repo onto a different machine invalidates them for that machine: re-run `adopt` there to repopulate both. The two aren't symmetric in one respect, though -- `repos.yaml` is an ordinary file that lives inside the control repo's own checkout (`<registry>/repos.yaml`, see below) and can be committed like any other file; the controls index (`~/.config/gatekeeper/controls.yaml`) lives outside every git checkout entirely and is never meant to be committed or synced.
+
+`.gatekeeper.yml` is optional and no longer written by `adopt` at all — it remains available as an **explicit, git-tracked override** (always takes priority over the controls index in the resolution order above) for a repo that wants a portable, checked-in config, or for a control/hub repo self-configuring its own self-gate workflow:
 
 ```yaml
 apiVersion: gatekeeper/v1
 registry: ../governance-hub/governance/registry # relative to this file's directory when possible
-repo: your-org/your-repo                         # optional; only written when --repo overrides the origin remote
-base: origin/main                                # optional; hand-edit to set check's default base
-actor: yourname                                  # optional; hand-edit to set an explicit actor identity
-agent:                                           # optional; hand-edit to enable `triage --run` / `init --run`
+repo: your-org/your-repo                         # optional; overrides origin-remote auto-detection
+base: origin/main                                # optional; sets check's default base
+actor: yourname                                  # optional; sets an explicit actor identity
+agent:                                           # optional; enables `triage --run` / `init --run`
   command: "codex exec --full-auto < {brief} > {out}" # placeholder; adjust to your local Codex CLI's actual flags
   timeout_seconds: 600                           # optional, defaults to 600 (max 3600)
 ```
 
-Every other command resolves `--registry`/`--repo`/`--base`/`--actor` in this order: an explicit CLI flag, then (registry only) the `GATEKEEPER_REGISTRY` environment variable, then `.gatekeeper.yml` found by walking up from the current directory (stopping at the Git root), then each command's own prior default (e.g. `check`'s local `main`/`master` auto-detection).
-
-`agent:` has no default `command` — it is never written by `adopt` and must be hand-edited in before `--run` works (see [BYO agent runner](#byo-agent-runner-triage---run-and-init---run) below). `{brief}`/`{out}` are placeholders `--run` substitutes with absolute paths; if `command` contains neither, the brief is piped into the command's stdin instead and its stdout is captured as the artifact. `agent:` accepts only `command` and `timeout_seconds` — unlike the top-level config, it does not accept `x-*` extension keys. Two real-shaped (but CLI-version-dependent — adjust to whatever your local CLI actually accepts) examples:
+`agent:` has no default `command` — it must be hand-written into an explicit `.gatekeeper.yml` before `--run` works (see [BYO agent runner](#byo-agent-runner-triage---run-and-init---run) below). `{brief}`/`{out}` are placeholders `--run` substitutes with absolute paths; if `command` contains neither, the brief is piped into the command's stdin instead and its stdout is captured as the artifact. `agent:` accepts only `command` and `timeout_seconds` — unlike the top-level config, it does not accept `x-*` extension keys. Two real-shaped (but CLI-version-dependent — adjust to whatever your local CLI actually accepts) examples:
 
 ```yaml
 agent:
@@ -121,6 +121,16 @@ repos:
     path: /work/your-repo   # local checkout path on this machine
     ci: github               # gitlab | github | none, auto-detected from the target repo
     adopted_at: 2026-07-19T00:00:00.000Z
+```
+
+`~/.config/gatekeeper/controls.yaml` (this machine's controls index; also host-machine-local, re-populated by re-running `adopt`/`init-control` on a new machine — never written into any git checkout):
+
+```yaml
+apiVersion: gatekeeper/v1
+controls:
+  - control: /work/governance-hub                            # control/hub repo root, realpath
+    registry: /work/governance-hub/governance/registry        # the registry `adopt` located inside it, realpath
+    registered_at: 2026-07-19T00:00:00.000Z
 ```
 
 ### 3. Provision scaffolding from the hub
@@ -166,8 +176,8 @@ gatekeeper check \
 
 | Command | Purpose |
 | --- | --- |
-| `gatekeeper init-control <path> [--force] [--no-detect]` | Scaffold a brand-new control/hub repo: `governance/registry` (policy.yaml, contracts/, repos.yaml), `governance/roles` (customizable role-card copies), a root `roles-policy.yaml` copy, and — unless `--no-detect` — `governance/agents.yaml` (detected local agent CLIs + role assignment), then validate the result. Idempotent per artifact; `--force` overwrites, except `repos.yaml` (`gatekeeper adopt`'s live roster), which `--force` never touches once it exists. |
-| `gatekeeper adopt --control <hub> [path]` | Register a repo (defaulting to the current directory) with the registry located inside `--control`: write `.gatekeeper.yml` at its root and upsert its entry into `<registry>/repos.yaml`. Refuses to run outside a Git working tree or when the target/control repos overlap. |
+| `gatekeeper init-control <path> [--force] [--no-detect]` | Scaffold a brand-new control/hub repo: `governance/registry` (policy.yaml, contracts/, repos.yaml), `governance/roles` (customizable role-card copies), a root `roles-policy.yaml` copy, and — unless `--no-detect` — `governance/agents.yaml` (detected local agent CLIs + role assignment), then validate the result and register itself in the local controls index. Idempotent per artifact; `--force` overwrites, except `repos.yaml` (`gatekeeper adopt`'s live roster), which `--force` never touches once it exists. |
+| `gatekeeper adopt --control <hub> [path]` | Register a repo (defaulting to the current directory) with the registry located inside `--control`: upsert its entry into `<registry>/repos.yaml` and register the control/registry pair in the local controls index. Zero-touch on the target repo -- no file is written or modified there. Refuses to run outside a Git working tree or when the target/control repos overlap. |
 | `gatekeeper provision [repos...] [--ci] [--hooks] [--agents-md] [--dry-run] [--force]` | Fan CI job injection, a fail-open pre-push hook, and an AGENTS.md instruction block out across every repo in `repos.yaml` (or just the named ones). No flag means all three. |
 | `gatekeeper validate [--registry <dir>] [--strict]` | Validate YAML/schema, level and lane references, regexes, preset collisions, overly broad bare `**` globs, and unusable frozen-mirror allowlists. `--strict` turns warnings into exit 1. |
 | `gatekeeper check [--registry <dir>] [--repo] [--base\|--staged\|--working-tree] [--json] [--explain]` | Evaluate a local Git diff and emit the engine Verdict. A confirmed block exits 1; infrastructure/configuration degradation exits 0 by default with a loud warning. `--strict-infra` is available for local debugging. |
@@ -178,14 +188,14 @@ gatekeeper check \
 | `gatekeeper init --repos <path>... --out <dir> [--run] [--agent-command <cmd>] [--agent-timeout <s>]` | Deterministically scan local checkouts for candidate cross-repo contract signals and write `scan.json` plus `init-brief.md`. It makes no model or network call itself; drafting is a separate agent or human step, or add `--run` to hand the brief to the resolved agent command (see [BYO agent runner](#byo-agent-runner-triage---run-and-init---run) below) and validate --strict its draft. |
 | `gatekeeper triage --issue <n> --repo org/name [--registry <dir>] [--run [--yes]] [--agent-command <cmd>] [--agent-timeout <s>]` | Fetch an issue and print a zero-model requirement-gate briefing with registry impact hints and role/model candidates. Add `--post --verdict-file <file>` to validate and record a completed judgment, sync its label/comment, and append `.gatekeeper/triage-ledger.jsonl`; or add `--run` to generate the briefing, run the resolved agent command, and confirm before posting in one command. |
 
-`--registry` is validated before anything else runs; when omitted, each command reports it needs one of `--registry`, `GATEKEEPER_REGISTRY`, or a discoverable `.gatekeeper.yml`. `adopt`/`validate`/`doctor`/`audit`/`triage`/`init`/`provision` fail loud (non-zero exit) on a damaged `.gatekeeper.yml`; `check`/`gate` degrade (fail open, per [the fail-direction commitment](#the-fail-direction-commitment)) since they sit on the merge path.
+`--registry` is validated before anything else runs; when omitted, each command reports it needs one of `--registry`, `GATEKEEPER_REGISTRY`, a discoverable `.gatekeeper.yml`, or a controls-index match. `validate`/`doctor`/`audit`/`triage`/`init`/`provision` fail loud (non-zero exit) on a damaged `.gatekeeper.yml` or controls index (or a controls-index-matched control's damaged `repos.yaml`); `check`/`gate` degrade (fail open, per [the fail-direction commitment](#the-fail-direction-commitment)) on the same damage since they sit on the merge path. A controls-index entry pointing at a control repo that no longer exists on this machine is not damage — it is silently skipped by `check`/`gate` and reported as a warning by every other command.
 
 ### BYO agent runner: triage --run and init --run
 
 `init --run`/`triage --run` drive a coding-agent CLI end-to-end in one command instead of a manual copy/paste hop through a separate agent session — see [src/agent/runner.ts](src/agent/runner.ts) for exactly how the resolved command is spawned and the `{brief}`/`{out}` placeholders resolved. `--run` never chooses or calls a model itself; it only ever executes a shell command resolved through a three-tier chain (highest priority first — see [src/agent/resolve.ts](src/agent/resolve.ts)):
 
 1. **Explicit CLI/env override** — `--agent-command <cmd>` (optionally with `--agent-timeout <seconds>`), or the `GATEKEEPER_AGENT_COMMAND` / `GATEKEEPER_AGENT_TIMEOUT_SECONDS` environment variables.
-2. **`.gatekeeper.yml`'s `agent:` block** (see [above](#1-adopt-each-repo-once)) — the usual per-repo configuration.
+2. **`.gatekeeper.yml`'s `agent:` block** (see [above](#2-adopt-each-repo-once)) — the usual per-repo configuration.
 3. **`governance/agents.yaml`'s role assignment** — a convenience fallback generated by `gatekeeper init-control`'s local CLI detection (see [Agent CLI detection and role assignment](#agent-cli-detection-and-role-assignment) above): `triage --run` uses the `deep-reasoner` assignment, `init --run` uses the `coder` assignment (the registry-drafter role is a coder-tier task). Silently skipped (falling through to the usual "no agent configured" error) if `governance/agents.yaml` doesn't exist or fails to parse — this tier is never required.
 
 Whichever tier resolves the command, `--run`'s output names it (e.g. `using agent from governance/agents.yaml (deep-reasoner: codex)`), so it's always clear where a given run's command came from without inspecting three separate files. Every tier's trust boundary is the same as an npm script or a git hook: `--run` only ever executes a shell command that already exists in a file/flag/env var you (or `init-control`'s detection pass) control.
