@@ -191,6 +191,13 @@ program
 		"--actor <name>",
 		"explicit actor identity recorded on the posted comment (defaults to .gatekeeper.yml's actor:)",
 	)
+	.option(
+		"--run",
+		"generate the briefing, run .gatekeeper.yml's configured agent: command against it, then confirm before posting the resulting verdict (mutually exclusive with --verdict-file/--post)",
+		false,
+	)
+	.option("--yes", "skip --run's interactive y/N confirmation (required when stdin is not a TTY)", false)
+	.option("--keep-artifacts", "keep --run's temporary brief/verdict files instead of deleting them on exit", false)
 	.action(async (options) => {
 		process.exitCode = await runTriage(options, process.cwd());
 	});

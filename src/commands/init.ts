@@ -3,13 +3,33 @@ import path from "node:path";
 
 import type { Command } from "commander";
 
-import { ConfigDiscoveryError, discoverConfig } from "../config/discover.js";
+import { AgentRunError, runAgentCommand } from "../agent/runner.js";
+import { ConfigDiscoveryError, discoverConfig, missingAgentMessage } from "../config/discover.js";
 import { renderInitBrief } from "../init/brief.js";
 import { RepoAccessError, scanRepos } from "../init/scan.js";
+import { runValidate } from "./validate.js";
 
 export interface InitOptions {
 	repos: string[];
 	out: string;
+	/** Run .gatekeeper.yml's configured agent against the brief to draft a registry, then validate --strict it. */
+	run?: boolean;
+}
+
+/**
+ * Fixed instructions appended (only for --run) to the brief handed to the
+ * agent: tells it exactly where to write its draft and in what shape, so the
+ * resulting directory can be validated standalone.
+ */
+function renderRunInstructions(draftDir: string): string {
+	return (
+		"\n---\n\n" +
+		"## --run draft-output instructions\n\n" +
+		`Write your drafted registry into ${draftDir} as a self-contained directory: a minimal ` +
+		"policy.yaml (declaring at least the level(s) your drafted contracts reference) plus one " +
+		"contracts/<name>.yaml file per candidate contract above, so the directory can be validated " +
+		"standalone with `gatekeeper validate --strict`. Do not write anywhere else.\n"
+	);
 }
 
 /**
@@ -31,8 +51,9 @@ export async function runInit(options: InitOptions, cwd: string): Promise<number
 	// still runs here for the same fail-loud reason as validate/doctor/triage: a damaged
 	// config file nearby is worth surfacing loudly to a local-authoring tool rather than
 	// silently ignoring it.
+	let discovered: Awaited<ReturnType<typeof discoverConfig>>;
 	try {
-		await discoverConfig(cwd);
+		discovered = await discoverConfig(cwd);
 	} catch (error) {
 		if (!(error instanceof ConfigDiscoveryError)) {
 			throw error;
@@ -91,12 +112,75 @@ export async function runInit(options: InitOptions, cwd: string): Promise<number
 	);
 	process.stdout.write(`  ${scanJsonPath}\n`);
 	process.stdout.write(`  ${briefPath}\n\n`);
-	process.stdout.write(
-		"Next step: hand init-brief.md to any coding agent (Claude Code / Codex / Cursor / pi / ...) running the " +
-			"registry-drafter role per docs/roles/registry-drafter.md (in pi you can also run /gatekeeper-init) to draft " +
-			"contracts/policy YAML from the candidates above, then run `gatekeeper validate --registry <dir>` to close the loop.\n",
+
+	if (!options.run) {
+		process.stdout.write(
+			"Next step: hand init-brief.md to any coding agent (Claude Code / Codex / Cursor / pi / ...) running the " +
+				"registry-drafter role per docs/roles/registry-drafter.md (in pi you can also run /gatekeeper-init) to draft " +
+				"contracts/policy YAML from the candidates above, then run `gatekeeper validate --registry <dir>` to close the loop.\n",
+		);
+		return 0;
+	}
+
+	const agentConfig = discovered?.config.agent;
+	if (!agentConfig) {
+		process.stderr.write(`${missingAgentMessage("init")}\n`);
+		return 2;
+	}
+
+	const draftDir = path.join(outDir, "registry-draft");
+	const runBriefPath = path.join(outDir, "run-brief.md");
+	await writeFile(runBriefPath, renderInitBrief(scan) + renderRunInstructions(draftDir), "utf8");
+
+	try {
+		await runAgentCommand({
+			command: agentConfig.command,
+			timeoutSeconds: agentConfig.timeoutSeconds,
+			briefPath: runBriefPath,
+			outPath: draftDir,
+			cwd,
+			env: process.env,
+		});
+	} catch (error) {
+		if (!(error instanceof AgentRunError)) {
+			throw error;
+		}
+		process.stderr.write(`gatekeeper init --run: ${error.message}\n`);
+		if (error.stderrTail) {
+			process.stderr.write(`--- agent stderr (tail) ---\n${error.stderrTail}\n`);
+		}
+		return 1;
+	}
+
+	const validateOutput: string[] = [];
+	const validateWarnings: string[] = [];
+	const validateExitCode = await runValidate(
+		{
+			registry: draftDir,
+			strict: true,
+			stdout: (chunk) => validateOutput.push(chunk),
+			stderr: (chunk) => validateWarnings.push(chunk),
+		},
+		cwd,
 	);
 
+	if (validateExitCode !== 0) {
+		process.stderr.write(`gatekeeper init --run: draft registry at ${draftDir} failed validate --strict:\n`);
+		for (const line of validateWarnings) {
+			process.stderr.write(line);
+		}
+		return 2;
+	}
+
+	// Strict validate only ever exits 0 when it produced zero warnings, so
+	// validateWarnings is necessarily empty here -- nothing left to relay.
+	for (const line of validateOutput) {
+		process.stdout.write(line);
+	}
+	process.stdout.write(
+		`gatekeeper init --run: draft registry at ${draftDir} passed validate --strict. Review it, then copy its ` +
+			"contracts/*.yaml (and merge any new policy.yaml levels) into your real registry.\n",
+	);
 	return 0;
 }
 
@@ -117,6 +201,11 @@ export function registerInitCommand(program: Command): void {
 		)
 		.option("--repos <path>", "local repo root path to scan (repeatable)", collect, [])
 		.requiredOption("--out <dir>", "output directory for scan.json and init-brief.md")
+		.option(
+			"--run",
+			"run .gatekeeper.yml's configured agent: command against the brief to draft a registry into <out>/registry-draft, then validate --strict it",
+			false,
+		)
 		.action(async (options) => {
 			process.exitCode = await runInit(options, process.cwd());
 		});

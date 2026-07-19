@@ -26,7 +26,7 @@
 
 | T-20260719-03 | 易用性 | 交互简化 A：配置发现 + adopt(--control 登记) + provision(总控批量落地)，中途三次用户设计修正全吸收 | sonnet-coder | R1: grok PASS(6nb 采 2) + claude FAIL(worktree ENOTDIR 整批崩溃，活体复现)；R2: claude PASS（common-dir 正解 + 批次纵深防御定性合规） | ✅ 验收提交 | records/T-20260719-03-usability.md |
 
-| T-20260719-04 | 易用性 | 交互简化 B：BYO agent runner（triage --run / init --run 直通用户声明的 agent 命令） | sonnet-coder | DISPATCH | 进行中 | - |
+| T-20260719-04 | 易用性 | 交互简化 B：BYO agent runner（agent.command 配置 + 双模式 runner + triage/init --run） | sonnet-coder | R1: claude FAIL(shell 引用，双场景活体) + grok FAIL(exit code 一致性、进程组终止)；R2: 双 PASS（三修复全 mutation 对照） | ✅ 验收提交 | records/T-20260719-04-byo-runner.md |
 
 ### 遗留债队列（活动，v1.1 候选）
 

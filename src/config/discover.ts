@@ -30,6 +30,13 @@ export class ConfigDiscoveryError extends Error {
 	}
 }
 
+export interface GatekeeperAgentConfig {
+	/** Shell command for the BYO agent runner (src/agent/runner.ts). May reference `{brief}`/`{out}` placeholders. */
+	command: string;
+	/** Wall-clock budget in seconds before SIGTERM. Defaults to 600 when the file omits it. */
+	timeoutSeconds: number;
+}
+
 export interface GatekeeperConfig {
 	apiVersion: "gatekeeper/v1";
 	/** Raw value from the file, not yet resolved against the config file's directory. */
@@ -37,6 +44,8 @@ export interface GatekeeperConfig {
 	repo?: string;
 	base?: string;
 	actor?: string;
+	/** `triage --run` / `init --run`'s BYO coding-agent command. No default — omitting it disables `--run`. */
+	agent?: GatekeeperAgentConfig;
 }
 
 export interface DiscoveredConfig {
@@ -47,7 +56,11 @@ export interface DiscoveredConfig {
 	config: GatekeeperConfig;
 }
 
-const KNOWN_CONFIG_KEYS = new Set(["apiVersion", "registry", "repo", "base", "actor"]);
+const KNOWN_CONFIG_KEYS = new Set(["apiVersion", "registry", "repo", "base", "actor", "agent"]);
+
+/** Upper bound for `agent.timeout_seconds` -- generous enough for a slow drafting run, small enough to bound a runaway `--run` invocation. */
+const MAX_AGENT_TIMEOUT_SECONDS = 3600;
+const DEFAULT_AGENT_TIMEOUT_SECONDS = 600;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -65,7 +78,7 @@ function rejectUnknownConfigKeys(value: unknown, context: z.RefinementCtx): void
 		context.addIssue({
 			code: z.ZodIssueCode.custom,
 			path: [key],
-			message: `Unknown key "${key}" (expected apiVersion/registry/repo/base/actor, or an x-* extension)`,
+			message: `Unknown key "${key}" (expected apiVersion/registry/repo/base/actor/agent, or an x-* extension)`,
 		});
 	}
 }
@@ -82,6 +95,13 @@ const gatekeeperConfigSchema = z.preprocess(
 			repo: z.string().min(1).optional(),
 			base: z.string().min(1).optional(),
 			actor: z.string().min(1).optional(),
+			agent: z
+				.object({
+					command: z.string().min(1),
+					timeout_seconds: z.number().int().positive().max(MAX_AGENT_TIMEOUT_SECONDS).optional(),
+				})
+				.strict()
+				.optional(),
 		})
 		.passthrough(),
 );
@@ -130,6 +150,12 @@ function parseConfigDocument(filePath: string, content: string): GatekeeperConfi
 	}
 	if (parsed.actor !== undefined) {
 		config.actor = parsed.actor;
+	}
+	if (parsed.agent !== undefined) {
+		config.agent = {
+			command: parsed.agent.command,
+			timeoutSeconds: parsed.agent.timeout_seconds ?? DEFAULT_AGENT_TIMEOUT_SECONDS,
+		};
 	}
 	return config;
 }
@@ -238,5 +264,25 @@ export function missingRegistryMessage(command: string): string {
 	return (
 		`gatekeeper ${command}: --registry is required; provide --registry <dir>, set GATEKEEPER_REGISTRY, ` +
 		`or add a ${GATEKEEPER_CONFIG_FILENAME} with a "registry:" field (see \`gatekeeper adopt\`).`
+	);
+}
+
+/**
+ * Shared "how do I configure --run's agent" hint for `triage --run`/`init
+ * --run` when `.gatekeeper.yml` has no `agent:` block. There is deliberately
+ * no default command -- `--run` only ever executes a coding-agent CLI the
+ * user named themselves (see src/agent/runner.ts's trust-boundary note).
+ * Both example lines are placeholders: adjust the flags to whatever your
+ * local Codex/Grok (or any other) CLI actually accepts.
+ */
+export function missingAgentMessage(command: string): string {
+	return (
+		`gatekeeper ${command} --run: no "agent:" block configured in ${GATEKEEPER_CONFIG_FILENAME}; add one, e.g.:\n\n` +
+		"agent:\n" +
+		'  command: "codex exec --full-auto < {brief} > {out}"   # adjust to your local Codex CLI\'s actual flags\n' +
+		"  timeout_seconds: 600\n\n" +
+		"or, for a CLI that takes an explicit prompt-file flag instead of stdin:\n\n" +
+		"agent:\n" +
+		'  command: "grok --prompt-file {brief} > {out}"   # adjust to your local Grok CLI\'s actual flags\n'
 	);
 }

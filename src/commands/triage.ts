@@ -1,9 +1,14 @@
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
+import { createInterface } from "node:readline/promises";
 
+import { AgentRunError, type AgentRunResult, runAgentCommand } from "../agent/runner.js";
 import {
 	ConfigDiscoveryError,
+	type DiscoveredConfig,
 	discoverConfig,
+	missingAgentMessage,
 	missingRegistryMessage,
 	resolveConfiguredField,
 	resolveRegistryOption,
@@ -55,6 +60,12 @@ export interface TriageOptions {
 	post?: boolean;
 	verdictFile?: string;
 	actor?: string;
+	/** Generate the briefing, run .gatekeeper.yml's configured agent against it, then confirm before posting. Mutually exclusive with --verdict-file/--post. */
+	run?: boolean;
+	/** Skip --run's interactive y/N confirmation. Required outside a TTY. */
+	yes?: boolean;
+	/** Keep --run's temporary brief/verdict files instead of deleting them on exit (any exit path). */
+	keepArtifacts?: boolean;
 }
 
 type TriageProvider = Pick<GitHubProvider, "getIssue" | "createIssueComment" | "addIssueLabels" | "removeIssueLabel">;
@@ -69,6 +80,12 @@ export interface TriageDependencies {
 	ledgerFile?: string;
 	rolesPolicyPath?: string;
 	piConfigDir?: string;
+	/** Injectable agent runner for --run (defaults to runAgentCommand). */
+	runAgent?: typeof runAgentCommand;
+	/** Injectable confirmation prompt for --run's interactive gate (defaults to a readline y/N prompt over process.stdin/stdout). */
+	promptConfirm?: (message: string) => Promise<boolean>;
+	/** Override for "is this an interactive TTY" in --run's confirmation gate (defaults to process.stdin.isTTY === true). */
+	isInteractive?: boolean;
 }
 
 function describeError(error: unknown): string {
@@ -277,14 +294,20 @@ async function resolveTierSelections(
 	}
 }
 
-async function runTriageBrief(
+/**
+ * Assembles the triage briefing markdown (contract summary + heuristic
+ * consumer-impact graph + roles-policy dispatch candidates). Shared by the
+ * plain-printing path (runTriageBrief) and --run, which instead writes it to
+ * a temp file as the agent's input.
+ */
+async function buildTriageBriefing(
 	options: ResolvedTriageOptions,
 	cwd: string,
 	key: string,
 	registry: Registry,
 	provider: TriageProvider,
 	dependencies: TriageDependencies,
-): Promise<number> {
+): Promise<string> {
 	let issueInput: TriageIssueInput | null = null;
 	let issueFetchWarning: string | undefined;
 	try {
@@ -304,7 +327,7 @@ async function runTriageBrief(
 		process.stderr.write(`warning: 无法加载 roles-policy: ${rolesPolicyWarning}\n`);
 	}
 
-	const briefing = renderTriageBriefing({
+	return renderTriageBriefing({
 		key,
 		repo: options.repo,
 		issue: issueInput,
@@ -314,6 +337,17 @@ async function runTriageBrief(
 		tiers,
 		...(registry.warnings.length > 0 ? { registryWarnings: registry.warnings.map(formatRegistryIssue) } : {}),
 	});
+}
+
+async function runTriageBrief(
+	options: ResolvedTriageOptions,
+	cwd: string,
+	key: string,
+	registry: Registry,
+	provider: TriageProvider,
+	dependencies: TriageDependencies,
+): Promise<number> {
+	const briefing = await buildTriageBriefing(options, cwd, key, registry, provider, dependencies);
 	process.stdout.write(briefing);
 	return 0;
 }
@@ -479,11 +513,168 @@ async function runTriagePost(
 	return 0;
 }
 
+/** Default --run confirmation prompt: a plain readline y/N question over process.stdin/stdout. */
+async function defaultPromptConfirm(message: string): Promise<boolean> {
+	const rl = createInterface({ input: process.stdin, output: process.stdout });
+	try {
+		const answer = await rl.question(message);
+		return /^y(es)?$/i.test(answer.trim());
+	} finally {
+		rl.close();
+	}
+}
+
+/**
+ * `triage --run`: generates the same briefing runTriageBrief would print,
+ * hands it to the `.gatekeeper.yml`-configured agent, subjects whatever
+ * verdict file the agent produces to the exact same hard validation
+ * (parseVerdictFile + suggested_level + validateDispatchAgainstRolesPolicy)
+ * --post applies to a hand-authored one, prints a summary, and -- after an
+ * explicit confirmation -- replays it through runTriagePost so posting logic
+ * is never duplicated.
+ */
+async function runTriageRun(
+	options: ResolvedTriageOptions,
+	cwd: string,
+	key: string,
+	registry: Registry,
+	provider: TriageProvider,
+	dependencies: TriageDependencies,
+	discovered: DiscoveredConfig | null,
+): Promise<number> {
+	const agentConfig = discovered?.config.agent;
+	if (!agentConfig) {
+		process.stderr.write(`${missingAgentMessage("triage")}\n`);
+		return 2;
+	}
+
+	const briefing = await buildTriageBriefing(options, cwd, key, registry, provider, dependencies);
+
+	const runDir = await mkdtemp(path.join(tmpdir(), "gatekeeper-triage-run-"));
+	try {
+		const briefPath = path.join(runDir, "brief.md");
+		const verdictPath = path.join(runDir, "verdict.json");
+		await writeFile(briefPath, briefing, "utf8");
+
+		let runResult: AgentRunResult;
+		try {
+			runResult = await (dependencies.runAgent ?? runAgentCommand)({
+				command: agentConfig.command,
+				timeoutSeconds: agentConfig.timeoutSeconds,
+				briefPath,
+				outPath: verdictPath,
+				cwd,
+				env: dependencies.env ?? process.env,
+			});
+		} catch (error) {
+			if (!(error instanceof AgentRunError)) {
+				throw error;
+			}
+			process.stderr.write(`gatekeeper triage --run: ${error.message}\n`);
+			if (error.stderrTail) {
+				process.stderr.write(`--- agent stderr (tail) ---\n${error.stderrTail}\n`);
+			}
+			return 1;
+		}
+		void runResult; // captured stdout/stderr from the agent run are diagnostic-only here.
+
+		let raw: string;
+		try {
+			raw = await readFile(verdictPath, "utf8");
+		} catch (error) {
+			process.stderr.write(
+				`gatekeeper triage --run: agent command did not produce a verdict file at ${verdictPath}: ` +
+					`${error instanceof Error ? error.message : String(error)}\n`,
+			);
+			return 1;
+		}
+
+		let parsed: ParsedVerdictFile;
+		try {
+			parsed = parseVerdictFile(raw, verdictPath);
+		} catch (error) {
+			if (!(error instanceof VerdictFileError)) {
+				throw error;
+			}
+			process.stderr.write(`gatekeeper triage --run: ${error.message}\n`);
+			return 2;
+		}
+		if (!Object.hasOwn(registry.policy.levels, parsed.suggested_level)) {
+			process.stderr.write(
+				`gatekeeper triage --run: ${verdictPath}: $.suggested_level ${JSON.stringify(parsed.suggested_level)} ` +
+					`is not declared in ${options.registry}/policy.yaml\n`,
+			);
+			return 2;
+		}
+		const verdict: TriageVerdict = {
+			decision: parsed.decision,
+			reason_summary: parsed.reason_summary,
+			suggested_level: parsed.suggested_level,
+			dispatch: parsed.dispatch,
+			...(parsed.acceptance_criteria ? { acceptance_criteria: parsed.acceptance_criteria } : {}),
+		};
+		let dispatchWarnings: string[];
+		try {
+			dispatchWarnings = (await validateDispatchAgainstRolesPolicy(cwd, verdict, dependencies, verdictPath)).warnings;
+		} catch (error) {
+			if (!(error instanceof VerdictFileError)) {
+				throw error;
+			}
+			process.stderr.write(`gatekeeper triage --run: ${error.message}\n`);
+			return 2;
+		}
+		for (const warning of dispatchWarnings) {
+			process.stderr.write(`warning: ${warning}\n`);
+		}
+
+		process.stdout.write(`gatekeeper triage --run: agent verdict for ${key}\n`);
+		process.stdout.write(`  decision: ${verdict.decision}\n`);
+		process.stdout.write(`  reason: ${verdict.reason_summary.split("\n")[0]}\n`);
+		process.stdout.write(`  suggested_level: ${verdict.suggested_level}\n`);
+		process.stdout.write(
+			`  dispatch: coder=${verdict.dispatch.coder} reviewers=${verdict.dispatch.reviewers.join(", ")}\n`,
+		);
+
+		let proceed = options.yes === true;
+		if (!proceed) {
+			const isTTY = dependencies.isInteractive ?? process.stdin.isTTY === true;
+			if (!isTTY) {
+				process.stderr.write(
+					"gatekeeper triage --run: not an interactive TTY; re-run with --yes to confirm posting non-interactively\n",
+				);
+				return 2;
+			}
+			proceed = await (dependencies.promptConfirm ?? defaultPromptConfirm)("Post this verdict? [y/N] ");
+		}
+		if (!proceed) {
+			process.stdout.write("gatekeeper triage --run: aborted (not confirmed); verdict not posted\n");
+			return 0;
+		}
+
+		return await runTriagePost({ ...options, verdictFile: verdictPath }, cwd, key, registry, provider, dependencies);
+	} finally {
+		if (options.keepArtifacts) {
+			process.stdout.write(`gatekeeper triage --run: kept run artifacts at ${runDir}\n`);
+		} else {
+			await rm(runDir, { recursive: true, force: true }).catch(() => undefined);
+		}
+	}
+}
+
 export async function runTriage(
 	options: TriageOptions,
 	cwd: string,
 	dependencies: TriageDependencies = {},
 ): Promise<number> {
+	if (options.run && options.verdictFile) {
+		process.stderr.write("gatekeeper triage: --run and --verdict-file are mutually exclusive\n");
+		return 2;
+	}
+	if (options.run && options.post) {
+		process.stderr.write("gatekeeper triage: --run already posts once confirmed; do not combine it with --post\n");
+		return 2;
+	}
+
 	// Config discovery (.gatekeeper.yml) is a local-authoring-command input like
 	// the registry directory itself: triage fails loud on damage, not the
 	// check/gate degrade path.
@@ -552,6 +743,9 @@ export async function runTriage(
 		return 2;
 	}
 
+	if (effectiveOptions.run) {
+		return runTriageRun(effectiveOptions, cwd, key, loaded.registry, provider, dependencies, discovered);
+	}
 	return effectiveOptions.post
 		? runTriagePost(effectiveOptions, cwd, key, loaded.registry, provider, dependencies)
 		: runTriageBrief(effectiveOptions, cwd, key, loaded.registry, provider, dependencies);

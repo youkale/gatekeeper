@@ -50,9 +50,25 @@ registry: ../governance-hub/governance/registry # relative to this file's direct
 repo: your-org/your-repo                         # optional; only written when --repo overrides the origin remote
 base: origin/main                                # optional; hand-edit to set check's default base
 actor: yourname                                  # optional; hand-edit to set an explicit actor identity
+agent:                                           # optional; hand-edit to enable `triage --run` / `init --run`
+  command: "codex exec --full-auto < {brief} > {out}" # placeholder; adjust to your local Codex CLI's actual flags
+  timeout_seconds: 600                           # optional, defaults to 600 (max 3600)
 ```
 
 Every other command resolves `--registry`/`--repo`/`--base`/`--actor` in this order: an explicit CLI flag, then (registry only) the `GATEKEEPER_REGISTRY` environment variable, then `.gatekeeper.yml` found by walking up from the current directory (stopping at the Git root), then each command's own prior default (e.g. `check`'s local `main`/`master` auto-detection).
+
+`agent:` has no default `command` — it is never written by `adopt` and must be hand-edited in before `--run` works (see [BYO agent runner](#byo-agent-runner-triage---run-and-init---run) below). `{brief}`/`{out}` are placeholders `--run` substitutes with absolute paths; if `command` contains neither, the brief is piped into the command's stdin instead and its stdout is captured as the artifact. `agent:` accepts only `command` and `timeout_seconds` — unlike the top-level config, it does not accept `x-*` extension keys. Two real-shaped (but CLI-version-dependent — adjust to whatever your local CLI actually accepts) examples:
+
+```yaml
+agent:
+  command: "codex exec --full-auto --skip-git-repo-check < {brief} > {out}" # adjust to your local Codex CLI
+  timeout_seconds: 600
+```
+
+```yaml
+agent:
+  command: "grok --prompt-file {brief} > {out}" # adjust to your local Grok CLI
+```
 
 `<registry>/repos.yaml` (written next to the located registry; workspace-specific — re-run `adopt` after cloning the workspace onto another machine):
 
@@ -116,12 +132,43 @@ gatekeeper check \
 | `gatekeeper doctor [--registry <dir>] [--repo] [--branch] [--workflow] [--check-name <name>...]` | Validate the registry and lane presets, discover gate job names, verify branch-protection required checks, and report `roles-policy.yaml` model-tier availability in the current pi configuration. |
 | `gatekeeper audit [--registry <dir>] --repo-path org/name=/checkout [...] [--json]` | Compare every authority/consumer include glob with files in mapped local checkouts. Confirmed drift exits 1; an invalid registry, mapping, or checkout exits 2. |
 | `gatekeeper stats [--source local\|github] [--file] [--repo] [--since] [--json]` | Aggregate PR gate ledger rounds by contract, verdict/override, and linked issue. Local input defaults to `.gatekeeper/ledger.jsonl`; GitHub input harvests merged PR sticky comments. |
-| `gatekeeper init --repos <path>... --out <dir>` | Deterministically scan local checkouts for candidate cross-repo contract signals and write `scan.json` plus `init-brief.md`. It makes no model or network call; drafting is a separate pi or human step. |
-| `gatekeeper triage --issue <n> --repo org/name [--registry <dir>]` | Fetch an issue and print a zero-model requirement-gate briefing with registry impact hints and role/model candidates. Add `--post --verdict-file <file>` to validate and record a completed judgment, sync its label/comment, and append `.gatekeeper/triage-ledger.jsonl`. |
+| `gatekeeper init --repos <path>... --out <dir> [--run]` | Deterministically scan local checkouts for candidate cross-repo contract signals and write `scan.json` plus `init-brief.md`. It makes no model or network call itself; drafting is a separate agent or human step, or add `--run` to hand the brief straight to `.gatekeeper.yml`'s configured `agent:` command and validate --strict its draft. |
+| `gatekeeper triage --issue <n> --repo org/name [--registry <dir>] [--run [--yes]]` | Fetch an issue and print a zero-model requirement-gate briefing with registry impact hints and role/model candidates. Add `--post --verdict-file <file>` to validate and record a completed judgment, sync its label/comment, and append `.gatekeeper/triage-ledger.jsonl`; or add `--run` to generate the briefing, run the configured agent, and confirm before posting in one command. |
 
 `--registry` is validated before anything else runs; when omitted, each command reports it needs one of `--registry`, `GATEKEEPER_REGISTRY`, or a discoverable `.gatekeeper.yml`. `adopt`/`validate`/`doctor`/`audit`/`triage`/`init`/`provision` fail loud (non-zero exit) on a damaged `.gatekeeper.yml`; `check`/`gate` degrade (fail open, per [the fail-direction commitment](#the-fail-direction-commitment)) since they sit on the merge path.
 
-Typical local authoring loop:
+### BYO agent runner: triage --run and init --run
+
+With an `agent:` command configured in `.gatekeeper.yml` (see [above](#1-adopt-each-repo-once)), `init` and `triage` can drive that CLI end-to-end in one command instead of a manual copy/paste hop through a separate agent session — see [src/agent/runner.ts](src/agent/runner.ts) for exactly how the command is spawned and the `{brief}`/`{out}` placeholders resolved. `--run` never chooses or calls a model itself; it only ever executes the shell command you named, the same trust boundary as an npm script or a git hook.
+
+Typical local authoring loop, one command:
+
+```bash
+gatekeeper init \
+  --repos /work/service-a \
+  --repos /work/service-b \
+  --out /tmp/gatekeeper-init \
+  --run
+# Drafts into /tmp/gatekeeper-init/registry-draft, then runs `gatekeeper validate --strict` on it
+# and reports pass/fail. Review the draft, then copy its contracts/*.yaml (and merge any new
+# policy.yaml levels) into your real registry and run `gatekeeper audit` against it as usual.
+```
+
+For an issue requirement gate, one command:
+
+```bash
+gatekeeper triage \
+  --issue 123 \
+  --repo your-org/service-a \
+  --registry /work/registry \
+  --run
+# Generates the briefing, runs the configured agent, prints the resulting decision/reason/dispatch
+# summary, and (after a y/N confirmation, or immediately with --yes) posts it through the same
+# validation and ledger/comment/label path as --post. Add --keep-artifacts to keep the temporary
+# brief/verdict files around for debugging instead of deleting them on exit.
+```
+
+### Manual multi-step authoring (no `agent:` configured, or reviewing before posting)
 
 ```bash
 gatekeeper init \
