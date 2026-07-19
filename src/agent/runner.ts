@@ -1,5 +1,5 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { readFile, writeFile } from "node:fs/promises";
+import { type FileHandle, open, readFile, writeFile } from "node:fs/promises";
 
 /**
  * BYO ("bring your own") coding-agent runner: spawns exactly the shell
@@ -27,14 +27,52 @@ export interface AgentRunOptions {
 	outPath: string;
 	cwd: string;
 	env?: NodeJS.ProcessEnv;
+	/**
+	 * Optional durable stdout/stderr file sink. Each file is opened in append
+	 * mode and inherited by an in-group relay, avoiding a supervisor-owned
+	 * output pipe while isolating the agent from runtime sink write failures.
+	 */
+	logSink?: AgentRunLogSinkOptions;
+	/** Called synchronously whenever new stdout/stderr output is observed. */
+	onActivity?: (activity: AgentOutputActivity) => void;
+	/** Optional external cancellation routed through the same process-group termination ladder as a timeout. */
+	signal?: AbortSignal;
+	/** Called immediately after a successful spawn with the child pid and its process-group id. */
+	onSpawn?: (process: AgentProcessInfo) => void;
+}
+
+export interface AgentOutputActivity {
+	stream: "stdout" | "stderr";
+	timestampMs: number;
+}
+
+export interface AgentProcessInfo {
+	pid: number;
+	/** POSIX detached children lead a group whose id equals pid; Windows has no equivalent and reports null. */
+	pgid: number | null;
+}
+
+export interface AgentRunLogSinkOptions {
+	stdoutPath: string;
+	stderrPath: string;
+}
+
+export interface AgentRunLogSinkResult {
+	mode: "direct" | "pipe-fallback";
+	degraded: boolean;
+	error?: string;
 }
 
 export interface AgentRunResult {
 	stdout: string;
 	stderr: string;
+	/** Present only when `logSink` was requested, preserving the legacy result shape by default. */
+	logSink?: AgentRunLogSinkResult;
+	/** Present only when an AbortSignal was supplied and the command exited without that signal firing. */
+	termination?: "natural";
 }
 
-export type AgentRunErrorKind = "spawn-failed" | "timeout" | "nonzero-exit";
+export type AgentRunErrorKind = "spawn-failed" | "timeout" | "external-abort" | "nonzero-exit";
 
 export class AgentRunError extends Error {
 	readonly kind: AgentRunErrorKind;
@@ -43,6 +81,8 @@ export class AgentRunError extends Error {
 	readonly signal: NodeJS.Signals | null;
 	/** Tail of the agent's stderr output, for diagnostics -- may be empty (e.g. a spawn failure has none). */
 	readonly stderrTail: string;
+	/** Present only when a requested direct log sink was active or fell back. */
+	readonly logSink?: AgentRunLogSinkResult;
 
 	constructor(
 		kind: AgentRunErrorKind,
@@ -52,6 +92,7 @@ export class AgentRunError extends Error {
 			exitCode?: number | null;
 			signal?: NodeJS.Signals | null;
 			stderrTail?: string;
+			logSink?: AgentRunLogSinkResult;
 			cause?: unknown;
 		},
 	) {
@@ -62,6 +103,9 @@ export class AgentRunError extends Error {
 		this.exitCode = details.exitCode ?? null;
 		this.signal = details.signal ?? null;
 		this.stderrTail = details.stderrTail ?? "";
+		if (details.logSink !== undefined) {
+			this.logSink = details.logSink;
+		}
 	}
 }
 
@@ -73,6 +117,245 @@ const STDERR_TAIL_CHARS = 4_000;
 function tail(text: string, maxChars: number): string {
 	return text.length > maxChars ? text.slice(text.length - maxChars) : text;
 }
+
+interface PreparedLogSink {
+	stdoutHandle: FileHandle;
+	stderrHandle: FileHandle;
+	stdoutPath: string;
+	stderrPath: string;
+	stdoutStart: number;
+	stderrStart: number;
+}
+
+function runnerWarning(message: string): void {
+	try {
+		process.stderr.write(`gatekeeper agent runner: ${message}\n`);
+	} catch {
+		// Reporting a log-sink fault is itself best-effort. It must never affect
+		// the child process or turn an otherwise healthy run into a failure.
+	}
+}
+
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+async function closeLogHandles(prepared: PreparedLogSink): Promise<string[]> {
+	const results = await Promise.allSettled([prepared.stdoutHandle.close(), prepared.stderrHandle.close()]);
+	return results.flatMap((result) => (result.status === "rejected" ? [errorMessage(result.reason)] : []));
+}
+
+async function prepareLogSink(
+	options: AgentRunLogSinkOptions,
+): Promise<{ prepared?: PreparedLogSink; result: AgentRunLogSinkResult }> {
+	let stdoutHandle: FileHandle | undefined;
+	let stderrHandle: FileHandle | undefined;
+	try {
+		stdoutHandle = await open(options.stdoutPath, "a");
+		const stdoutStart = (await stdoutHandle.stat()).size;
+		stderrHandle = await open(options.stderrPath, "a");
+		const stderrStart = (await stderrHandle.stat()).size;
+		return {
+			prepared: {
+				stdoutHandle,
+				stderrHandle,
+				stdoutPath: options.stdoutPath,
+				stderrPath: options.stderrPath,
+				stdoutStart,
+				stderrStart,
+			},
+			result: { mode: "direct", degraded: false },
+		};
+	} catch (error) {
+		await Promise.allSettled([stdoutHandle?.close(), stderrHandle?.close()]);
+		const message = errorMessage(error);
+		runnerWarning(`could not open direct log sink; falling back to output pipes: ${message}`);
+		return { result: { mode: "pipe-fallback", degraded: true, error: message } };
+	}
+}
+
+async function readAppendedOutput(path: string, start: number): Promise<string> {
+	const content = await readFile(path);
+	return content.subarray(Math.min(start, content.length)).toString("utf8");
+}
+
+async function finishLogSink(
+	prepared: PreparedLogSink,
+	initialResult: AgentRunLogSinkResult,
+	runtimeErrors: string[],
+): Promise<{ stdout: string; stderr: string; result: AgentRunLogSinkResult }> {
+	const errors = [...runtimeErrors];
+	const finalizationErrors: string[] = [];
+	for (const handle of [prepared.stdoutHandle, prepared.stderrHandle]) {
+		try {
+			await handle.sync();
+		} catch (error) {
+			finalizationErrors.push(errorMessage(error));
+		}
+	}
+
+	let stdout = "";
+	let stderr = "";
+	try {
+		[stdout, stderr] = await Promise.all([
+			readAppendedOutput(prepared.stdoutPath, prepared.stdoutStart),
+			readAppendedOutput(prepared.stderrPath, prepared.stderrStart),
+		]);
+	} catch (error) {
+		finalizationErrors.push(errorMessage(error));
+	}
+	finalizationErrors.push(...(await closeLogHandles(prepared)));
+	errors.push(...finalizationErrors);
+
+	if (errors.length === 0) {
+		return { stdout, stderr, result: initialResult };
+	}
+	const message = errors.join("; ");
+	if (finalizationErrors.length > 0) {
+		runnerWarning(`direct log sink degraded while the agent continued: ${finalizationErrors.join("; ")}`);
+	}
+	return { stdout, stderr, result: { mode: "direct", degraded: true, error: message } };
+}
+
+function reportActivity(
+	onActivity: ((activity: AgentOutputActivity) => void) | undefined,
+	stream: AgentOutputActivity["stream"],
+	timestampMs = Date.now(),
+): void {
+	if (!onActivity) {
+		return;
+	}
+	try {
+		onActivity({ stream, timestampMs });
+	} catch (error) {
+		runnerWarning(`output activity callback failed while the agent continued: ${errorMessage(error)}`);
+	}
+}
+
+interface LogRelayMessage {
+	type: "activity" | "sink-error" | "relay-complete";
+	stream?: AgentOutputActivity["stream"];
+	timestampMs?: number;
+	error?: string;
+	sinkErrors?: string[];
+}
+
+function isLogRelayMessage(message: unknown): message is LogRelayMessage {
+	if (typeof message !== "object" || message === null) {
+		return false;
+	}
+	const candidate = message as Partial<LogRelayMessage>;
+	if (candidate.type === "relay-complete") {
+		return Array.isArray(candidate.sinkErrors) && candidate.sinkErrors.every((error) => typeof error === "string");
+	}
+	return (
+		(candidate.type === "activity" || candidate.type === "sink-error") &&
+		(candidate.stream === "stdout" || candidate.stream === "stderr")
+	);
+}
+
+/**
+ * Runs only in the optional log-sink mode. This relay is the detached process
+ * group leader exposed as the run's pid/pgid; the configured shell command is
+ * its non-detached child and therefore remains inside the same termination
+ * group. The relay owns the output pipes, not the supervisor, so supervisor
+ * death does not close them. If a log write later fails, it discards and keeps
+ * draining that stream so the agent never observes EPIPE/EFBIG from the sink.
+ */
+const LOG_RELAY_SCRIPT = `
+const { spawn } = require("node:child_process");
+const { createWriteStream } = require("node:fs");
+
+const command = process.argv[1];
+const useStdin = process.argv[2] === "pipe";
+const sinkErrors = [];
+const pendingActivity = { stdout: 0, stderr: 0 };
+const sentActivity = { stdout: 0, stderr: 0 };
+
+function send(message, callback) {
+  if (!process.connected || typeof process.send !== "function") {
+    callback?.();
+    return;
+  }
+  try {
+    process.send(message, (error) => callback?.(error));
+  } catch {
+    callback?.();
+  }
+}
+
+function flushActivity() {
+  for (const stream of ["stdout", "stderr"]) {
+    const timestampMs = pendingActivity[stream];
+    if (timestampMs > sentActivity[stream]) {
+      sentActivity[stream] = timestampMs;
+      send({ type: "activity", stream, timestampMs });
+    }
+  }
+}
+
+const activityTimer = setInterval(flushActivity, 100);
+activityTimer.unref();
+process.on("disconnect", () => undefined);
+try {
+  process.on("SIGXFSZ", () => undefined);
+} catch {
+  // SIGXFSZ is not available on every supported platform.
+}
+
+const agent = spawn(command, {
+  shell: true,
+  stdio: [useStdin ? "inherit" : "ignore", "pipe", "pipe"],
+});
+
+function relay(readable, fd, stream) {
+  return new Promise((resolve) => {
+    const sink = createWriteStream("", { fd, autoClose: false });
+    let finished = false;
+    const finish = () => {
+      if (!finished) {
+        finished = true;
+        resolve();
+      }
+    };
+    readable.on("data", () => {
+      pendingActivity[stream] = Date.now();
+    });
+    sink.once("finish", finish);
+    sink.once("error", (error) => {
+      const detail = stream + ": " + (error instanceof Error ? error.message : String(error));
+      sinkErrors.push(detail);
+      send({ type: "sink-error", stream, error: detail });
+      readable.unpipe(sink);
+      readable.resume();
+      finish();
+    });
+    readable.pipe(sink);
+  });
+}
+
+const relays = [relay(agent.stdout, 3, "stdout"), relay(agent.stderr, 4, "stderr")];
+let spawnError;
+agent.once("error", (error) => {
+  spawnError = error;
+});
+agent.once("close", async (code, signal) => {
+  await Promise.all(relays);
+  clearInterval(activityTimer);
+  flushActivity();
+  const finish = () => {
+    if (process.connected) {
+      process.disconnect();
+    }
+    if (signal) {
+      process.kill(process.pid, signal);
+      return;
+    }
+    process.exit(spawnError ? 1 : (code ?? 1));
+  };
+  send({ type: "relay-complete", sinkErrors }, finish);
+});
+`;
 
 /**
  * POSIX shell single-quoting for a path value *we* generated (mkdtemp's
@@ -169,31 +452,118 @@ function substitutePlaceholders(
  * degraded-but-successful run.
  */
 export async function runAgentCommand(options: AgentRunOptions): Promise<AgentRunResult> {
-	const { command: rawCommand, timeoutSeconds, briefPath, outPath, cwd, env } = options;
+	const {
+		command: rawCommand,
+		timeoutSeconds,
+		briefPath,
+		outPath,
+		cwd,
+		env,
+		logSink,
+		onActivity,
+		signal: abortSignal,
+		onSpawn,
+	} = options;
 	const { command, usedPlaceholder } = substitutePlaceholders(rawCommand, briefPath, outPath);
 
 	const stdinContent = usedPlaceholder ? undefined : await readFile(briefPath, "utf8");
+	const preparedLogSink = logSink ? await prepareLogSink(logSink) : undefined;
 
 	const result = await new Promise<AgentRunResult>((resolve, reject) => {
-		const child = spawn(command, {
-			cwd,
-			env: env ?? process.env,
-			shell: true,
-			stdio: [usedPlaceholder ? "ignore" : "pipe", "pipe", "pipe"],
-			// POSIX only -- see killProcessGroup's doc comment for why this (plus
-			// signalling the negative pid on timeout) is needed to reap a real
-			// agent process that outlives the immediate shell child.
-			...(IS_WINDOWS ? {} : { detached: true }),
-		});
+		const directLogSink = preparedLogSink?.prepared;
+		let child: ChildProcess;
+		try {
+			if (directLogSink) {
+				child = spawn(process.execPath, ["-e", LOG_RELAY_SCRIPT, command, usedPlaceholder ? "ignore" : "pipe"], {
+					cwd,
+					env: env ?? process.env,
+					stdio: [
+						usedPlaceholder ? "ignore" : "pipe",
+						"ignore",
+						"ignore",
+						directLogSink.stdoutHandle.fd,
+						directLogSink.stderrHandle.fd,
+						"ipc",
+					],
+					// The relay is the group leader and its agent child stays in this
+					// same group, so the existing negative-pgid ladder covers both.
+					...(IS_WINDOWS ? {} : { detached: true }),
+				});
+			} else {
+				child = spawn(command, {
+					cwd,
+					env: env ?? process.env,
+					shell: true,
+					stdio: [usedPlaceholder ? "ignore" : "pipe", "pipe", "pipe"],
+					// POSIX only -- see killProcessGroup's doc comment for why this (plus
+					// signalling the negative pid on timeout) is needed to reap a real
+					// agent process that outlives the immediate shell child.
+					...(IS_WINDOWS ? {} : { detached: true }),
+				});
+			}
+		} catch (error) {
+			if (preparedLogSink?.prepared) {
+				void closeLogHandles(preparedLogSink.prepared);
+			}
+			reject(error);
+			return;
+		}
 
 		let stdout = "";
 		let stderr = "";
 		let settled = false;
-		let timedOut = false;
+		let terminationReason: "timeout" | "external-abort" | undefined;
 		let termTimer: NodeJS.Timeout | undefined;
+		let abortListener: (() => void) | undefined;
+		const runtimeSinkErrors = new Set<string>();
+		const recordRuntimeSinkError = (error: string): void => {
+			if (runtimeSinkErrors.has(error)) {
+				return;
+			}
+			runtimeSinkErrors.add(error);
+			runnerWarning(`direct log sink degraded while the agent continued: ${error}`);
+		};
 
-		termTimer = setTimeout(() => {
-			timedOut = true;
+		if (onSpawn) {
+			child.once("spawn", () => {
+				if (child.pid === undefined) {
+					runnerWarning("spawn callback could not observe a child pid while the agent continued");
+					return;
+				}
+				try {
+					onSpawn({ pid: child.pid, pgid: IS_WINDOWS ? null : child.pid });
+				} catch (error) {
+					runnerWarning(`spawn callback failed while the agent continued: ${errorMessage(error)}`);
+				}
+			});
+		}
+
+		if (directLogSink) {
+			child.on("message", (message) => {
+				if (!isLogRelayMessage(message)) {
+					return;
+				}
+				if (message.type === "activity" && message.stream && typeof message.timestampMs === "number") {
+					reportActivity(onActivity, message.stream, message.timestampMs);
+					return;
+				}
+				if (message.type === "sink-error" && typeof message.error === "string") {
+					recordRuntimeSinkError(message.error);
+					return;
+				}
+				for (const error of message.sinkErrors ?? []) {
+					recordRuntimeSinkError(error);
+				}
+			});
+		}
+
+		const beginTermination = (reason: "timeout" | "external-abort"): void => {
+			if (terminationReason) {
+				// First trigger wins. A later abort or timeout reuses the ladder but must
+				// not rewrite the causal outcome already recorded by the supervisor.
+				return;
+			}
+			terminationReason = reason;
 			killProcessGroup(child, "SIGTERM");
 			// Deliberately not cancelled if the immediate child's own "close" fires
 			// first (see below): a grandchild ignoring SIGTERM can outlive the
@@ -203,13 +573,16 @@ export async function runAgentCommand(options: AgentRunOptions): Promise<AgentRu
 			setTimeout(() => {
 				killProcessGroup(child, "SIGKILL");
 			}, KILL_GRACE_MS);
-		}, timeoutSeconds * 1000);
+		};
+		termTimer = setTimeout(() => beginTermination("timeout"), timeoutSeconds * 1000);
 
 		child.stdout?.on("data", (chunk: Buffer) => {
 			stdout += chunk.toString("utf8");
+			reportActivity(onActivity, "stdout");
 		});
 		child.stderr?.on("data", (chunk: Buffer) => {
 			stderr += chunk.toString("utf8");
+			reportActivity(onActivity, "stderr");
 		});
 		// A pipe-mode command whose process doesn't read stdin to completion (e.g. exits
 		// as soon as it has enough input, or never reads at all) makes writing/ending our
@@ -226,9 +599,16 @@ export async function runAgentCommand(options: AgentRunOptions): Promise<AgentRu
 			if (termTimer) {
 				clearTimeout(termTimer);
 			}
+			if (abortListener) {
+				abortSignal?.removeEventListener("abort", abortListener);
+			}
+			if (preparedLogSink?.prepared) {
+				void closeLogHandles(preparedLogSink.prepared);
+			}
 			reject(
 				new AgentRunError("spawn-failed", `failed to run agent command: ${error.message}`, {
 					command,
+					logSink: preparedLogSink?.result,
 					cause: error,
 				}),
 			);
@@ -242,29 +622,81 @@ export async function runAgentCommand(options: AgentRunOptions): Promise<AgentRu
 			if (termTimer) {
 				clearTimeout(termTimer);
 			}
-			if (timedOut) {
-				reject(
-					new AgentRunError("timeout", `agent command exceeded ${timeoutSeconds}s timeout: ${command}`, {
-						command,
-						exitCode: code,
-						signal,
-						stderrTail: tail(stderr, STDERR_TAIL_CHARS),
-					}),
-				);
-				return;
+			if (abortListener) {
+				abortSignal?.removeEventListener("abort", abortListener);
 			}
-			if (code !== 0) {
-				reject(
-					new AgentRunError(
-						"nonzero-exit",
-						`agent command exited with code ${code}${signal ? ` (signal ${signal})` : ""}: ${command}`,
-						{ command, exitCode: code, signal, stderrTail: tail(stderr, STDERR_TAIL_CHARS) },
-					),
-				);
-				return;
-			}
-			resolve({ stdout, stderr });
+			void (async () => {
+				let finalStdout = stdout;
+				let finalStderr = stderr;
+				let finalLogSink = preparedLogSink?.result;
+				if (preparedLogSink?.prepared) {
+					const finished = await finishLogSink(preparedLogSink.prepared, preparedLogSink.result, [
+						...runtimeSinkErrors,
+					]);
+					finalStdout = finished.stdout;
+					finalStderr = finished.stderr;
+					finalLogSink = finished.result;
+				}
+				if (terminationReason === "external-abort") {
+					reject(
+						new AgentRunError("external-abort", `agent command was externally aborted: ${command}`, {
+							command,
+							exitCode: code,
+							signal,
+							stderrTail: tail(finalStderr, STDERR_TAIL_CHARS),
+							logSink: finalLogSink,
+						}),
+					);
+					return;
+				}
+				if (terminationReason === "timeout") {
+					reject(
+						new AgentRunError("timeout", `agent command exceeded ${timeoutSeconds}s timeout: ${command}`, {
+							command,
+							exitCode: code,
+							signal,
+							stderrTail: tail(finalStderr, STDERR_TAIL_CHARS),
+							logSink: finalLogSink,
+						}),
+					);
+					return;
+				}
+				if (code !== 0) {
+					reject(
+						new AgentRunError(
+							"nonzero-exit",
+							`agent command exited with code ${code}${signal ? ` (signal ${signal})` : ""}: ${command}`,
+							{
+								command,
+								exitCode: code,
+								signal,
+								stderrTail: tail(finalStderr, STDERR_TAIL_CHARS),
+								logSink: finalLogSink,
+							},
+						),
+					);
+					return;
+				}
+				resolve({
+					stdout: finalStdout,
+					stderr: finalStderr,
+					...(finalLogSink ? { logSink: finalLogSink } : {}),
+					...(abortSignal ? { termination: "natural" as const } : {}),
+				});
+			})().catch(reject);
 		});
+
+		if (abortSignal) {
+			abortListener = () => {
+				if (child.exitCode === null && child.signalCode === null) {
+					beginTermination("external-abort");
+				}
+			};
+			abortSignal.addEventListener("abort", abortListener, { once: true });
+			if (abortSignal.aborted) {
+				abortListener();
+			}
+		}
 
 		if (!usedPlaceholder) {
 			child.stdin?.write(stdinContent ?? "");
