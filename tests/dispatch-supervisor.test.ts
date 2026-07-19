@@ -346,6 +346,260 @@ describe("dispatch supervision loop", () => {
 		expect(runner).toHaveBeenCalledTimes(2);
 	});
 
+	it("resumes an exhausted ladder with one explicit override and delivers", async () => {
+		const setupResult = await setup();
+		const exhausted = await superviseWorkOrder(
+			{ orderId: setupResult.order.id, baseRef: "main" },
+			dependencies(setupResult, {
+				runner: scriptedRunner([
+					{ kind: "error", stderr: "first failure" },
+					{ kind: "error", stderr: "second failure" },
+				]),
+				evidence: [noEvidence, noEvidence],
+			}),
+		);
+		expect(exhausted.state).toBe("NEEDS_ATTENTION");
+
+		const override = { cli: "gemini", vendor: "google", command: "gemini run {brief} {out}" };
+		const resumedRunner = scriptedRunner([{ kind: "deliver" }]);
+		const resumed = await superviseWorkOrder(
+			{
+				orderId: setupResult.order.id,
+				baseRef: "main",
+				resumeFromAttention: true,
+				agentOverride: override,
+			},
+			dependencies(setupResult, {
+				runner: resumedRunner,
+				evidence: [deliveredEvidence],
+				heads: ["before-override", "after-override"],
+			}),
+		);
+
+		expect(resumed.state).toBe("DELIVERED");
+		expect(resumed.runs.map((run) => [run.cli, run.outcome])).toEqual([
+			["codex", "AGENT_ERROR"],
+			["codex", "AGENT_ERROR"],
+			["gemini", "COMPLETED"],
+		]);
+		expect(resumed.authoringVendors).toEqual(["google"]);
+		expect((resumedRunner.mock.calls[0]?.[0] as AgentRunOptions | undefined)?.command).toContain("gemini");
+		expect((await loadOrder(setupResult.order.id, setupResult.env)).journal.map((event) => event.type)).toEqual([
+			"ORDER_CREATED",
+			"RUN_STARTED",
+			"RUN_RETRY_SCHEDULED",
+			"ATTENTION_REQUIRED",
+			"ORDER_RESUMED",
+			"ORDER_DELIVERED",
+		]);
+	});
+
+	it("keeps the existing NEEDS_ATTENTION early return byte-for-byte when no resume intent is passed", async () => {
+		const setupResult = await setup();
+		const attention = await superviseWorkOrder(
+			{ orderId: setupResult.order.id, baseRef: "main" },
+			dependencies(setupResult, {
+				runner: scriptedRunner([
+					{ kind: "error", stderr: "first failure" },
+					{ kind: "error", stderr: "second failure" },
+				]),
+				evidence: [noEvidence, noEvidence],
+			}),
+		);
+		const journalFile = path.join(dispatchOrderDirectory(setupResult.order.id, setupResult.env), "journal.jsonl");
+		const beforeJournal = await readFile(journalFile, "utf8");
+		const runner = scriptedRunner([]);
+
+		const unchanged = await superviseWorkOrder(
+			{ orderId: setupResult.order.id, baseRef: "main" },
+			dependencies(setupResult, { runner, evidence: [] }),
+		);
+
+		expect(unchanged).toEqual({
+			orderId: setupResult.order.id,
+			state: "NEEDS_ATTENTION",
+			runs: attention.runs,
+			authoringVendors: [],
+			resumeHint: `gatekeeper dispatch resume ${setupResult.order.id}`,
+			warnings: [],
+		});
+		expect(await readFile(journalFile, "utf8")).toBe(beforeJournal);
+		expect(runner).not.toHaveBeenCalled();
+	});
+
+	it("resumes without an override at the next unexhausted frozen candidate", async () => {
+		const setupResult = await setup([
+			{ cli: "codex", vendor: "openai", command: "codex exec {brief} {out}" },
+			{ cli: "claude", vendor: "anthropic", command: "claude -p {brief} {out}" },
+		]);
+		const attention = await superviseWorkOrder(
+			{ orderId: setupResult.order.id, baseRef: "main" },
+			dependencies(setupResult, {
+				runner: scriptedRunner([{ kind: "error", stderr: "blocked" }]),
+				evidence: [blockedEvidence],
+			}),
+		);
+		expect(attention.state).toBe("NEEDS_ATTENTION");
+
+		const runner = scriptedRunner([{ kind: "deliver" }]);
+		const resumed = await superviseWorkOrder(
+			{ orderId: setupResult.order.id, baseRef: "main", resumeFromAttention: true },
+			dependencies(setupResult, { runner, evidence: [deliveredEvidence] }),
+		);
+
+		expect(resumed.state).toBe("DELIVERED");
+		expect((runner.mock.calls[0]?.[0] as AgentRunOptions | undefined)?.command).toContain("claude");
+	});
+
+	it("explicitly refuses an attention resume after the total run cap without an override", async () => {
+		const setupResult = await setup([
+			{ cli: "codex", vendor: "v1", command: "codex 1 {brief} {out}" },
+			{ cli: "codex", vendor: "v2", command: "codex 2 {brief} {out}" },
+			{ cli: "codex", vendor: "v3", command: "codex 3 {brief} {out}" },
+			{ cli: "codex", vendor: "v4", command: "codex 4 {brief} {out}" },
+		]);
+		const rateLimited = Array.from({ length: 4 }, () => ({
+			kind: "error" as const,
+			stderr: "You've hit your Codex usage limit; try again in 1h",
+		}));
+		const attention = await superviseWorkOrder(
+			{ orderId: setupResult.order.id, baseRef: "main" },
+			dependencies(setupResult, {
+				runner: scriptedRunner(rateLimited),
+				evidence: [noEvidence, noEvidence, noEvidence, noEvidence],
+			}),
+		);
+		expect(attention.state).toBe("NEEDS_ATTENTION");
+		const journalFile = path.join(dispatchOrderDirectory(setupResult.order.id, setupResult.env), "journal.jsonl");
+		const beforeJournal = await readFile(journalFile, "utf8");
+		const runner = scriptedRunner([]);
+
+		const refused = await superviseWorkOrder(
+			{ orderId: setupResult.order.id, baseRef: "main", resumeFromAttention: true },
+			dependencies(setupResult, { runner, evidence: [] }),
+		);
+
+		expect(refused.state).toBe("NEEDS_ATTENTION");
+		expect(refused.runs).toHaveLength(4);
+		expect(refused.resumeHint).toContain("total run cap of 4 is already exhausted");
+		expect(refused.resumeHint).toContain("no agent override was supplied");
+		expect(await readFile(journalFile, "utf8")).toBe(beforeJournal);
+		expect(runner).not.toHaveBeenCalled();
+	});
+
+	it("folds and replays a truncated ORDER_RESUMED override before the run directory is published", async () => {
+		const setupResult = await setup();
+		await superviseWorkOrder(
+			{ orderId: setupResult.order.id, baseRef: "main" },
+			dependencies(setupResult, {
+				runner: scriptedRunner([
+					{ kind: "error", stderr: "first failure" },
+					{ kind: "error", stderr: "second failure" },
+				]),
+				evidence: [noEvidence, noEvidence],
+			}),
+		);
+		const override = { cli: "gemini", vendor: "google", command: "gemini run {brief} {out}" };
+		await expect(
+			superviseWorkOrder(
+				{
+					orderId: setupResult.order.id,
+					baseRef: "main",
+					resumeFromAttention: true,
+					agentOverride: override,
+				},
+				dependencies(setupResult, {
+					runner: scriptedRunner([]),
+					evidence: [],
+					beforeRunPublish: async () => {
+						throw new Error("simulated attention resume publication crash");
+					},
+				}),
+			),
+		).rejects.toThrow("simulated attention resume publication crash");
+
+		const truncated = await loadOrder(setupResult.order.id, setupResult.env);
+		expect(truncated.state).toBe("RUNNING");
+		expect(truncated.runs).toHaveLength(2);
+		expect(truncated.journal.at(-1)).toMatchObject({
+			type: "ORDER_RESUMED",
+			from: "NEEDS_ATTENTION",
+			to: "RUNNING",
+			new_run_id: "r003",
+		});
+
+		const replayRunner = scriptedRunner([{ kind: "deliver" }]);
+		const replayed = await superviseWorkOrder(
+			{ orderId: setupResult.order.id, baseRef: "main" },
+			dependencies(setupResult, { runner: replayRunner, evidence: [deliveredEvidence] }),
+		);
+
+		expect(replayed.state).toBe("DELIVERED");
+		expect(replayed.runs.at(-1)).toMatchObject({ id: "r003", cli: "gemini", vendor: "google", outcome: "COMPLETED" });
+		expect((replayRunner.mock.calls[0]?.[0] as AgentRunOptions | undefined)?.command).toContain("gemini");
+	});
+
+	it("replaces a stale override schedule after journal append fails before a no-override replay", async () => {
+		const setupResult = await setup([
+			{ cli: "codex", vendor: "openai", command: "codex exec {brief} {out}" },
+			{ cli: "claude", vendor: "anthropic", command: "claude -p {brief} {out}" },
+		]);
+		await superviseWorkOrder(
+			{ orderId: setupResult.order.id, baseRef: "main" },
+			dependencies(setupResult, {
+				runner: scriptedRunner([{ kind: "error", stderr: "blocked" }]),
+				evidence: [blockedEvidence],
+			}),
+		);
+
+		await expect(
+			superviseWorkOrder(
+				{
+					orderId: setupResult.order.id,
+					baseRef: "main",
+					resumeFromAttention: true,
+					agentOverride: { cli: "gemini", vendor: "google", command: "gemini run {brief} {out}" },
+				},
+				dependencies(setupResult, {
+					runner: scriptedRunner([]),
+					evidence: [],
+					append: async (_orderId, event) => {
+						if (event.type === "ORDER_RESUMED") {
+							throw new Error("simulated ORDER_RESUMED append failure");
+						}
+					},
+				}),
+			),
+		).rejects.toThrow("simulated ORDER_RESUMED append failure");
+		expect((await loadOrder(setupResult.order.id, setupResult.env)).state).toBe("NEEDS_ATTENTION");
+
+		await expect(
+			superviseWorkOrder(
+				{ orderId: setupResult.order.id, baseRef: "main", resumeFromAttention: true },
+				dependencies(setupResult, {
+					runner: scriptedRunner([]),
+					evidence: [],
+					beforeRunPublish: async () => {
+						throw new Error("simulated frozen-candidate publication crash");
+					},
+				}),
+			),
+		).rejects.toThrow("simulated frozen-candidate publication crash");
+
+		const truncated = await loadOrder(setupResult.order.id, setupResult.env);
+		expect(truncated.state).toBe("RUNNING");
+		expect(truncated.journal.at(-1)).toMatchObject({ type: "ORDER_RESUMED", new_run_id: "r002" });
+		const replayRunner = scriptedRunner([{ kind: "deliver" }]);
+		const replayed = await superviseWorkOrder(
+			{ orderId: setupResult.order.id, baseRef: "main" },
+			dependencies(setupResult, { runner: replayRunner, evidence: [deliveredEvidence] }),
+		);
+
+		expect(replayed.state).toBe("DELIVERED");
+		expect(replayed.runs.at(-1)).toMatchObject({ id: "r002", cli: "claude", vendor: "anthropic" });
+		expect((replayRunner.mock.calls[0]?.[0] as AgentRunOptions | undefined)?.command).toContain("claude");
+	});
+
 	it("persists each scheduling transition before invoking the corresponding runner action", async () => {
 		const setupResult = await setup([
 			{ cli: "codex", vendor: "openai", command: "codex exec {brief} {out}" },

@@ -121,6 +121,10 @@ export interface SuperviseWorkOrderInput {
 	readonly stallSeconds?: number;
 	readonly maxRunSeconds?: number;
 	readonly forceCooldown?: boolean;
+	/** Explicit operator intent to cross NEEDS_ATTENTION -> RUNNING. */
+	readonly resumeFromAttention?: boolean;
+	/** A manually selected single-candidate ladder for this attention resume. */
+	readonly agentOverride?: WorkOrder["candidate_ladder"][number];
 	/** Package E passes the non-interactive result of its --wait/--kill prompt here. */
 	readonly orphanAction?: OrphanAction;
 	readonly reviewerVendor?: string;
@@ -299,6 +303,26 @@ function nextCandidate(
 	return attempts < 2 ? order.candidate_ladder[index] : order.candidate_ladder[index + 1];
 }
 
+function nextAttentionCandidate(order: WorkOrder, runs: readonly Run[]): Candidate | undefined {
+	const previous = runs.at(-1);
+	const previousIndex = previous ? candidateIndex(order, previous) : -1;
+	for (let index = Math.max(0, previousIndex); index < order.candidate_ladder.length; index += 1) {
+		const candidate = order.candidate_ladder[index];
+		if (!candidate) {
+			continue;
+		}
+		const attempts = runs.filter((run) => candidateIndex(order, run) === index);
+		if (attempts.length === 0) {
+			return candidate;
+		}
+		const lastAttempt = attempts.at(-1);
+		if (lastAttempt?.outcome && TRANSIENT_OUTCOMES.has(lastAttempt.outcome) && attempts.length < 2) {
+			return candidate;
+		}
+	}
+	return undefined;
+}
+
 function activeRun(runs: readonly Run[]): Run | undefined {
 	return runs.find((run) => run.outcome === undefined);
 }
@@ -403,6 +427,79 @@ async function persistRun(orderDirectory: string, run: Run, idGenerator: () => s
 const WORKSPACE_FINGERPRINT_FILENAME = "workspace-before.json";
 const COOLDOWN_FILENAME = "cooldown.json";
 const BASE_IDENTITY_FILENAME = "base.json";
+const ATTENTION_RESUME_SCHEDULE_FILENAME = "attention-resume-schedule.json";
+
+interface AttentionResumeSchedule {
+	newRunId: Run["id"];
+	candidate: Candidate;
+	singleCandidate: boolean;
+}
+
+async function readAttentionResumeSchedule(orderDirectory: string): Promise<AttentionResumeSchedule | undefined> {
+	try {
+		const value: unknown = JSON.parse(
+			await readFile(path.join(orderDirectory, ATTENTION_RESUME_SCHEDULE_FILENAME), "utf8"),
+		);
+		if (
+			typeof value === "object" &&
+			value !== null &&
+			"new_run_id" in value &&
+			typeof value.new_run_id === "string" &&
+			/^r\d{3}$/.test(value.new_run_id) &&
+			"candidate" in value &&
+			typeof value.candidate === "object" &&
+			value.candidate !== null &&
+			"cli" in value.candidate &&
+			typeof value.candidate.cli === "string" &&
+			value.candidate.cli.length > 0 &&
+			"vendor" in value.candidate &&
+			typeof value.candidate.vendor === "string" &&
+			value.candidate.vendor.length > 0 &&
+			"command" in value.candidate &&
+			typeof value.candidate.command === "string" &&
+			value.candidate.command.length > 0 &&
+			"single_candidate" in value &&
+			typeof value.single_candidate === "boolean"
+		) {
+			return {
+				newRunId: value.new_run_id as Run["id"],
+				candidate: {
+					cli: value.candidate.cli,
+					vendor: value.candidate.vendor,
+					command: value.candidate.command,
+				},
+				singleCandidate: value.single_candidate,
+			};
+		}
+		throw new DispatchSupervisorError("STATE_REPAIR_FAILED", "attention resume schedule sidecar is malformed");
+	} catch (error) {
+		if (errorCode(error) === "ENOENT" || errorCode(error) === "ENOTDIR") {
+			return undefined;
+		}
+		if (error instanceof SyntaxError) {
+			throw new DispatchSupervisorError("STATE_REPAIR_FAILED", "attention resume schedule sidecar is invalid JSON", {
+				cause: error,
+			});
+		}
+		throw error;
+	}
+}
+
+async function persistAttentionResumeSchedule(
+	orderDirectory: string,
+	schedule: AttentionResumeSchedule,
+	idGenerator: () => string,
+): Promise<void> {
+	await atomicWrite(
+		path.join(orderDirectory, ATTENTION_RESUME_SCHEDULE_FILENAME),
+		`${JSON.stringify({
+			new_run_id: schedule.newRunId,
+			candidate: schedule.candidate,
+			single_candidate: schedule.singleCandidate,
+		})}\n`,
+		idGenerator,
+	);
+}
 
 async function readBaseIdentity(orderDirectory: string): Promise<string | undefined> {
 	try {
@@ -809,6 +906,21 @@ function lastTransitionEvent(loaded: LoadedWorkOrder): StateTransitionEvent | un
 	return undefined;
 }
 
+function activeAttentionResumeEvent(
+	loaded: LoadedWorkOrder,
+): Extract<JournalEvent, { type: "ORDER_RESUMED" }> | undefined {
+	for (let index = loaded.journal.length - 1; index >= 0; index -= 1) {
+		const event = loaded.journal[index];
+		if (event?.type === "ATTENTION_REQUIRED") {
+			return undefined;
+		}
+		if (event?.type === "ORDER_RESUMED" && event.from === "NEEDS_ATTENTION") {
+			return event;
+		}
+	}
+	return undefined;
+}
+
 async function readLog(file: string, fallback: string): Promise<string> {
 	try {
 		const durable = await readFile(file, "utf8");
@@ -881,6 +993,30 @@ export async function superviseWorkOrder(
 			gitEvidenceAvailable: true,
 		};
 		const orderDirectory = dispatchOrderDirectory(input.orderId, env);
+		let schedulingOrder = mutable.loaded.order;
+		let attentionResumeSchedule: AttentionResumeSchedule | undefined;
+		if (mutable.loaded.state === "RUNNING" || mutable.loaded.state === "WAITING_COOLDOWN") {
+			const resumeEvent = activeAttentionResumeEvent(mutable.loaded);
+			if (resumeEvent) {
+				const persisted = await readAttentionResumeSchedule(orderDirectory);
+				if (!persisted || persisted.newRunId !== resumeEvent.new_run_id) {
+					throw new DispatchSupervisorError(
+						"STATE_REPAIR_FAILED",
+						`attention resume ${resumeEvent.new_run_id} lacks its matching durable schedule`,
+					);
+				}
+				attentionResumeSchedule = persisted;
+				if (persisted.singleCandidate) {
+					schedulingOrder = { ...mutable.loaded.order, candidate_ladder: [persisted.candidate] };
+				}
+			}
+		}
+		const schedulingRuns = (): readonly Run[] =>
+			attentionResumeSchedule?.singleCandidate
+				? mutable.loaded.runs.filter(
+						(run) => runNumber(run.id) >= runNumber(attentionResumeSchedule?.newRunId ?? "r999"),
+					)
+				: mutable.loaded.runs;
 		let frozenBaseOid = await readBaseIdentity(orderDirectory);
 		let baseRef = frozenBaseOid ?? input.baseRef;
 		if (frozenBaseOid !== undefined) {
@@ -1060,7 +1196,7 @@ export async function superviseWorkOrder(
 				return result();
 			}
 
-			const candidate = nextCandidate(mutable.loaded.order, mutable.loaded.runs, run);
+			const candidate = nextCandidate(schedulingOrder, schedulingRuns(), run);
 			const newRunId = nextRunId(mutable.loaded.runs);
 			if (candidate) {
 				await appendTransition(
@@ -1127,7 +1263,7 @@ export async function superviseWorkOrder(
 					env,
 					append,
 				);
-				const sameCandidate = nextCandidate(mutable.loaded.order, mutable.loaded.runs, run, true);
+				const sameCandidate = nextCandidate(schedulingOrder, schedulingRuns(), run, true);
 				if (!sameCandidate) {
 					throw new DispatchSupervisorError("STATE_REPAIR_FAILED", `cannot reselect cooled candidate for ${run.id}`);
 				}
@@ -1160,11 +1296,50 @@ export async function superviseWorkOrder(
 			const unfinishedCancellation = activeRun(mutable.loaded.runs);
 			return unfinishedCancellation ? finalizeJournalledKill(unfinishedCancellation) : result();
 		}
+		let pending: PendingRun | undefined;
 		if (mutable.loaded.state === "NEEDS_ATTENTION") {
-			return result({ resumeHint: `gatekeeper dispatch resume ${input.orderId}` });
+			if (!input.resumeFromAttention) {
+				return result({ resumeHint: `gatekeeper dispatch resume ${input.orderId}` });
+			}
+			if (mutable.loaded.runs.length >= DISPATCH_TOTAL_RUN_CAP) {
+				return result({
+					resumeHint: `cannot resume ${input.orderId}: total run cap of ${DISPATCH_TOTAL_RUN_CAP} is already exhausted${input.agentOverride ? "" : " and no agent override was supplied"}`,
+				});
+			}
+			const candidate = input.agentOverride ?? nextAttentionCandidate(mutable.loaded.order, mutable.loaded.runs);
+			if (!candidate) {
+				return result({
+					resumeHint: `cannot resume ${input.orderId}: the frozen candidate ladder has no unexhausted candidate; supply an agent override`,
+				});
+			}
+			const newRunId = nextRunId(mutable.loaded.runs);
+			attentionResumeSchedule = {
+				newRunId,
+				candidate,
+				singleCandidate: input.agentOverride !== undefined,
+			};
+			await persistAttentionResumeSchedule(orderDirectory, attentionResumeSchedule, idGenerator);
+			if (attentionResumeSchedule.singleCandidate) {
+				schedulingOrder = { ...mutable.loaded.order, candidate_ladder: [candidate] };
+			}
+			await appendTransition(
+				mutable,
+				{
+					apiVersion: "gatekeeper/v1",
+					type: "ORDER_RESUMED",
+					order_id: input.orderId,
+					at: now().toISOString(),
+					new_run_id: newRunId,
+					from: "NEEDS_ATTENTION",
+					to: "RUNNING",
+					forced: false,
+				},
+				env,
+				append,
+			);
+			pending = { runId: newRunId, candidate };
 		}
 
-		let pending: PendingRun | undefined;
 		if (mutable.loaded.state === "WAITING_COOLDOWN") {
 			let cooldown: Extract<JournalEvent, { type: "COOLDOWN_STARTED" }> | undefined;
 			for (let index = mutable.loaded.journal.length - 1; index >= 0; index -= 1) {
@@ -1203,7 +1378,7 @@ export async function superviseWorkOrder(
 				env,
 				append,
 			);
-			const candidate = nextCandidate(mutable.loaded.order, mutable.loaded.runs, previous, true);
+			const candidate = nextCandidate(schedulingOrder, schedulingRuns(), previous, true);
 			if (!candidate) {
 				throw new DispatchSupervisorError("STATE_REPAIR_FAILED", "cooled ladder candidate is no longer available");
 			}
@@ -1322,9 +1497,12 @@ export async function superviseWorkOrder(
 				if (scheduled && !alreadyExists) {
 					const previous = mutable.loaded.runs.at(-1);
 					const transition = lastTransitionEvent(mutable.loaded);
-					const candidate = previous
-						? nextCandidate(mutable.loaded.order, mutable.loaded.runs, previous, transition?.type === "ORDER_RESUMED")
-						: mutable.loaded.order.candidate_ladder[0];
+					const candidate =
+						attentionResumeSchedule?.newRunId === scheduled
+							? attentionResumeSchedule.candidate
+							: previous
+								? nextCandidate(schedulingOrder, schedulingRuns(), previous, transition?.type === "ORDER_RESUMED")
+								: schedulingOrder.candidate_ladder[0];
 					if (!candidate) {
 						throw new DispatchSupervisorError("STATE_REPAIR_FAILED", `cannot reconstruct candidate for ${scheduled}`);
 					}
