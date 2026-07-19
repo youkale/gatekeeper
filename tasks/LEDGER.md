@@ -42,6 +42,11 @@
 
 | T-20260719-10 | 架构设计 | dispatch 最小版设计：CLI 进程统一抽象 + 状态机 + 限额/挂掉的切换与重唤起（用户立项） | deep-reasoner | 设计交付，无 review 轮（实现包 A-F 各自走闭环） | ✅ 设计定稿（调度者已裁 3 项未决） | tasks/records/T-20260719-10-dispatch-design.md |
 
+| T-20260720-01 | 复杂编码 | dispatch A 包：订单存储 + journal 事件溯源 + 状态机 + 监督器锁（设计见 T-10 record §1-3/§9） | codex | codex 内审 3 轮 + 调度者发起外审 claude(opus)/grok 双 PASS | ✅ 验收提交（617 测试；filelock ABA 指控经 claude 独立证实 → D 包前置债 T-20260720-03） | tasks/records/T-20260720-01-dispatch-foundation.md |
+
+| T-20260720-02 | 复杂编码 | dispatch B 包：runner 日志 sink + 活动回调 + 外部 abort + pgid 暴露（向后兼容可选项，设计 §5/拆解表B） | codex | DISPATCH | 进行中 | - |
+| T-20260720-03 | 缺陷修复 | filelock.ts 双 stale waiter ABA 竞态（codex 指控、claude 可执行模型证实：盲删 rm 不重验 pid）——D 包硬前置 | sonnet-coder | DISPATCH | 进行中 | - |
+
 ### 遗留债队列（活动，v1.1 候选）
 
 - [接入信号] init-control 给总控仓自身写 .gatekeeper.yml（hub 侧零参数）

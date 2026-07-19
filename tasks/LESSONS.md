@@ -11,6 +11,7 @@
 - [T-20260719-09] codex review 沙箱只读致 vitest EPERM 假失败 ×3（R1/R2/R3 各一次，R3 险些被当成验收阻断）→ 同类 ≥2 规范修订触发：codex-reviewer 角色文件增「沙箱测试失败一律标注噪音、以调度者本机运行为地面事实」条款 → 处置：已修订 .claude/agents/codex-reviewer.md。
 - [T-20260719-08] 运维任务标 ✅ 未写 record，被 R2 治理检查器（R2 规则）在下一个任务的验收中拦下——机器检查器首次抓住调度者自己的流程漏洞（产品自证）→ 运维/无 review 任务同样必须当场写 record → 处置：record 补写；本条留档。
 - [T-20260719-09] 修复轮的「预防性补项」有效：编码者自评风险（controls.yaml 未同款原子写）被调度者判为下轮必报 blocker，先行派修避免了可预见的第 4 轮全量往返 → 自评风险不只是给 reviewer 的线索，也是调度者的排程输入。
+- [T-20260720-01] 短临界区文件锁不能仅因同样使用 `O_EXCL + PID` 就直接复用于长持有监督器锁：既有 `withFileLock` 的 stale waiter 会按共享路径删除 guard，两个同时读到死 PID 的 waiter 可互删新 owner 并双双进入临界区 → 复用先例前必须重验持有时长、崩溃恢复和 ABA/所有权假设；本次改用不可变 hard-link CAS claim 链，并以双 waiter barrier 测试固定“恰一接管” → 处置：已在 `src/dispatch/lock.ts` 注释语义差异并留存回归。
 
 ## MVP 收官总复盘（2026-07-18）
 
