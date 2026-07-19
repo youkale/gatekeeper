@@ -36,7 +36,13 @@
 
 - [T-07 低优] tests/agent-detect.test.ts 相对段用例的 chdir-free 硬化（codex 处方：path.relative 构造，免疫未来 pool 切换；当前默认 forks 池下 511 全绿，非缺陷）
 
+| T-20260719-08 | 运维 | Syncify 生态真实接入（新总控仓 syncify-governance：init-control + 4 真实契约 + 6 仓 adopt + provision agents-md/hooks + 零参数冒烟三仓全对） | 调度者 | 运维操作无 review 轮 | ✅ 完成（总控仓 9b7b170） | - |
+
 ### 遗留债队列（活动，v1.1 候选）
+
+- [接入信号] init-control 给总控仓自身写 .gatekeeper.yml（hub 侧零参数）
+- [接入信号] gatekeeper 进 GitLab runner（npm 发布或烧进 syncify-ci 镜像）——CI 注入的硬前置
+- [接入信号] doctor 平台感知（GitLab 生态不应报 GitHub workflow 告警）
 
 - [v1.1] enforce: hard 的真实前置：受信外部通道（GitHub App/webhook → repository_dispatch 触发默认分支 workflow）——workflow_run 桥接已实现但可被 PR 压制脉冲，仅 best-effort（T-11 裁决结论）
 - [T-09] schedule/workflow_dispatch 兜底 job 真实 runner 联调（现可 gh workflow run 手动触发验证）
