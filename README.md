@@ -227,6 +227,8 @@ gatekeeper triage \
 # brief/verdict files around for debugging instead of deleting them on exit.
 ```
 
+A posted triage verdict's `dispatch.coder`/`dispatch.reviewers` fields describe a dispatch **plan**, not an execution. `gatekeeper dispatch start --issue 123` picks up that same issue's latest triage-ledger entry and actually runs it end to end against a coder-tier agent CLI, with a bounded retry/switch ladder and a report-and-stop posture on anything it cannot resolve automatically — see [Dispatch: local execution supervisor](#dispatch-local-execution-supervisor) below.
+
 ### Manual multi-step authoring (no `agent:` configured, or reviewing before posting)
 
 ```bash
@@ -260,6 +262,20 @@ gatekeeper triage \
   --post \
   --verdict-file /tmp/triage-123.json
 ```
+
+## Dispatch: local execution supervisor
+
+`gatekeeper dispatch` drives a coding-agent CLI against a GitHub issue end to end, in a local, registered checkout, toward a terminal or report-and-stop state (`DELIVERED`, `NEEDS_ATTENTION`, `WAITING_COOLDOWN`, or `ABANDONED`) — the execution counterpart to `triage`'s judgment. `triage --post` decides *whether* work should happen and proposes a coder/reviewer plan; `dispatch start` actually runs it, retrying/switching agents within a bounded ladder and stopping to report to a human rather than ever silently giving up or claiming a false success. Dispatch never itself renders a merge verdict — the resulting branch/PR still goes through the normal `gatekeeper gate`/review path. See [`docs/DISPATCH.md`](docs/DISPATCH.md) for the full state machine, the RESULT.json delivery-evidence contract, the retry/switch/cooldown ladder, and the crash/orphan recovery playbook.
+
+| Command | Purpose |
+| --- | --- |
+| `gatekeeper dispatch start --issue <n> [--brief <file>] [--agent-command <cmd>] [--run-timeout <s>] [--repo <org/name>] [--registry <dir>] [--yes]` | Create a work order for a GitHub issue (brief from `--brief`, or synthesized from the issue body plus the target repo's triage ledger — last matching entry wins) and run the front-of-terminal supervision loop until a terminal/report state. |
+| `gatekeeper dispatch status [<order-id>] [--json]` | List every order's one-line summary, or show one order's full detail: runs, log paths, resumable-at time, `NEEDS_ATTENTION` reason, and any reviewer-vendor conflicts. Read-only, never mutates an order. |
+| `gatekeeper dispatch logs <order-id> [--run <rNNN>]` | Print a run's log file paths and their tail (`--follow` is deliberately not implemented — tail the printed paths directly to watch a live run). |
+| `gatekeeper dispatch resume <order-id> [--agent <cli>] [--wait\|--kill\|--confirm-dead] [--force]` | Resume a `WAITING_COOLDOWN` order once its cooldown elapses (or immediately with `--force`), resume a `NEEDS_ATTENTION` order back to `RUNNING` (optionally with `--agent` naming a substitute CLI), or reconcile a `RUNNING` order whose previous supervisor process died. |
+| `gatekeeper dispatch cancel <order-id>` | Terminate an order's active run (if any) and mark it `ABANDONED`; a no-op on an already-terminal order; a still-`PENDING` order cannot be cancelled (exit `2` — see [docs/DISPATCH.md](docs/DISPATCH.md#55-pending-cancel)). |
+
+Dispatch's own state (`order.yaml`, an append-only `journal.jsonl`, per-run logs and RESULT.json/PROGRESS.md evidence) lives at `<GATEKEEPER_CONFIG_DIR, default ~/.config/gatekeeper>/dispatch/orders/<order-id>/` — host-machine state outside every git checkout, the same posture as `controls.yaml`. Dispatch's own exit-code convention differs from every other command: `0` covers a `DELIVERED` result plus most (not all — see `docs/DISPATCH.md`'s exit-code table) harmless no-ops, `2` is a user/config error, `3` is dispatch's own report-and-stop outcome, and `1` is never used (reserved exclusively for `gatekeeper gate`'s block verdict).
 
 ## GitHub Action
 

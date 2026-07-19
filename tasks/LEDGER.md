@@ -56,7 +56,7 @@
 
 | T-20260720-08 | 复杂编码 | D 包回补：NEEDS_ATTENTION resume→RUNNING + --agent 阶梯覆盖（设计 §2 明文边，E 包暴露缺口） | codex | codex 内审 + 合并终审 claude(opus)/grok 双 PASS（探针级） | ✅ 验收提交 | tasks/records/T-20260720-08-attention-resume.md |
 
-| T-20260720-09 | 常规编码（文档化标准面） | dispatch F 包：docs/DISPATCH.md + README 节（拆解表F，双 review 不减） | sonnet-coder | DISPATCH | 进行中 | - |
+| T-20260720-09 | 常规编码（文档化标准面） | dispatch F 包：docs/DISPATCH.md + README 节（拆解表F，双 review 不减） | sonnet-coder | claude(opus) PASS + grok 3 轮（2 blocker 均文档-代码矛盾类，逆向反查所得） | ✅ 验收提交 | tasks/records/T-20260720-09-dispatch-docs.md |
 
 ### 遗留债队列（活动，v1.1 候选）
 
