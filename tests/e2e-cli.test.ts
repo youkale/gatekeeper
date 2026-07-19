@@ -569,6 +569,38 @@ levels: {}
 	});
 });
 
+describe("M2 CLI e2e: gatekeeper dispatch status (empty store)", () => {
+	it("lists no orders and exits 0 against a fresh GATEKEEPER_CONFIG_DIR", () => {
+		const tmpBase = mkdtempSync(path.join(tmpdir(), "gatekeeper-e2e-dispatch-status-"));
+		try {
+			const configDir = path.join(tmpBase, "config");
+			const env = { GATEKEEPER_CONFIG_DIR: configDir };
+
+			const result = runCli(tmpBase, ["dispatch", "status"], env);
+			expect(result.status).toBe(0);
+			expect(result.stdout).toContain("no orders");
+
+			const jsonResult = runCli(tmpBase, ["dispatch", "status", "--json"], env);
+			expect(jsonResult.status).toBe(0);
+			expect(JSON.parse(jsonResult.stdout)).toEqual({ orders: [] });
+		} finally {
+			rmSync(tmpBase, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("M2 CLI e2e: gatekeeper dispatch resume --help (T-20260720-07 R2 wiring)", () => {
+	it("documents the NEEDS_ATTENTION --agent resolution and exit-code contract, with no leftover 'not wired'/'not implemented' language", () => {
+		const help = runCli(process.cwd(), ["dispatch", "resume", "--help"]);
+		expect(help.status).toBe(0);
+		expect(help.stdout).toContain("resume a NEEDS_ATTENTION order back to RUNNING");
+		expect(help.stdout).toContain("detectAgentClis finds right now");
+		expect(help.stdout).toContain("Exit codes: 0 on a DELIVERED result");
+		expect(help.stdout).not.toContain("not yet wired");
+		expect(help.stdout).not.toContain("not yet implemented");
+	});
+});
+
 describe("gitdiff parseNameStatusZ status normalization", () => {
 	it("normalizes type-change T and unmerged U to M instead of silently dropping them", () => {
 		const files = parseNameStatusZ("T\0scripts/guarded.sh\0U\0conflicted.txt\0");

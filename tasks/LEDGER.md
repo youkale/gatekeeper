@@ -52,7 +52,11 @@
 | T-20260720-05 | 缺陷修复 | filelock 补审返工：marker 记 owner + 恢复文案静默前置 + lockPath symlink fail-closed（codex 补审 2 blocker） | sonnet-coder | claude(opus)+grok 双 PASS（攻击场景可执行重放核销） | ✅ 验收提交 | tasks/records/T-20260720-05-filelock-rework.md |
 | T-20260720-06 | 复杂编码 | dispatch D 包：监督循环 + 阶梯 + cooldown + 交接合成 + git 工作区协议（设计最难包，拆解表D） | codex | codex 内审 + 外审 claude(opus)/grok 双 PASS（探针级验证）；3 偏离项全裁可接受 | ✅ 验收提交（761 测试） | tasks/records/T-20260720-06-supervisor.md |
 
-| T-20260720-07 | 常规编码 | dispatch E 包：CLI 五子命令 + brief 合成 + status 渲染（拆解表E） | sonnet-coder | DISPATCH | 进行中 | - |
+| T-20260720-07 | 常规编码 | dispatch E 包：CLI 五子命令 + brief 合成 + status 渲染（拆解表E） | sonnet-coder | claude(opus)+grok 2 轮 + 合并终审双 PASS（R1 双路同缺陷交叉印证退出码铁律） | ✅ 验收提交（820 测试） | tasks/records/T-20260720-07-dispatch-cli.md |
+
+| T-20260720-08 | 复杂编码 | D 包回补：NEEDS_ATTENTION resume→RUNNING + --agent 阶梯覆盖（设计 §2 明文边，E 包暴露缺口） | codex | codex 内审 + 合并终审 claude(opus)/grok 双 PASS（探针级） | ✅ 验收提交 | tasks/records/T-20260720-08-attention-resume.md |
+
+| T-20260720-09 | 常规编码（文档化标准面） | dispatch F 包：docs/DISPATCH.md + README 节（拆解表F，双 review 不减） | sonnet-coder | DISPATCH | 进行中 | - |
 
 ### 遗留债队列（活动，v1.1 候选）
 

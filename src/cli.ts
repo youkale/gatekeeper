@@ -7,6 +7,13 @@ import { Command, CommanderError, InvalidArgumentError, Option } from "commander
 import { runAdopt } from "./commands/adopt.js";
 import { runAudit } from "./commands/audit.js";
 import { runCheck } from "./commands/check.js";
+import {
+	runDispatchCancel,
+	runDispatchLogs,
+	runDispatchResume,
+	runDispatchStart,
+	runDispatchStatus,
+} from "./commands/dispatch.js";
 import { agentsCapabilityCheck, rolesPolicyCapabilityCheck, runDoctor } from "./commands/doctor.js";
 import { runGate } from "./commands/gate.js";
 import { registerInitCommand } from "./commands/init.js";
@@ -225,6 +232,142 @@ program
 	)
 	.action(async (options) => {
 		process.exitCode = await runTriage(options, process.cwd());
+	});
+
+const dispatch = program
+	.command("dispatch")
+	.description(
+		"Local execution supervisor: create/drive a coding-agent run against a GitHub issue toward a verdict. Not a " +
+			"merge gate -- see each subcommand's own --help for its exact exit code contract. In every subcommand, " +
+			"exit code 0 covers both a DELIVERED supervision result and a harmless no-op (e.g. `start` declined at " +
+			"its confirmation prompt, or `resume`/`cancel` on an order that was already terminal); exit code 1 is " +
+			"reserved for `gatekeeper gate`'s block verdict and is never used here.",
+	);
+
+dispatch
+	.command("start")
+	.description(
+		"Create a dispatch work order for a GitHub issue and run its front-of-terminal supervision loop until a " +
+			"terminal/report state (DELIVERED / NEEDS_ATTENTION / WAITING_COOLDOWN / ABANDONED). The target repo must " +
+			"already be registered via `gatekeeper adopt` (auto-detected from the current checkout, or named " +
+			"explicitly with --repo). Brief source: --brief file wins outright; otherwise synthesized from the issue " +
+			"body plus the target repo's triage ledger (.gatekeeper/triage-ledger.jsonl) -- when the same issue has " +
+			"more than one triage line, the LAST one wins. Exit codes: 0 on a DELIVERED supervision result, or when " +
+			"the confirmation prompt (or --yes) declines to start (no order is created); 2 on bad input/config; 3 " +
+			"on every other non-error report-and-stop outcome (NEEDS_ATTENTION / WAITING_COOLDOWN / ABANDONED / an " +
+			"unresolved orphan / a dispatch infrastructure fault); never 1.",
+	)
+	.requiredOption("--issue <n>", "GitHub issue number to dispatch", positiveInteger)
+	.option("--brief <file>", "explicit brief file (takes priority over --issue-based synthesis)")
+	.option(
+		"--agent-command <cmd>",
+		"explicit single-candidate agent command override (collapses the candidate ladder to this one item)",
+	)
+	.option(
+		"--run-timeout <seconds>",
+		"per-run wall-clock budget in seconds (defaults to DISPATCH_MAX_RUN_SECONDS/GATEKEEPER_DISPATCH_MAX_RUN_SECONDS)",
+		positiveInteger,
+	)
+	.option(
+		"--repo <org/name>",
+		"explicit target repo identity, must already be registered via `gatekeeper adopt` " +
+			"(defaults to auto-detecting the current checkout's repo)",
+	)
+	.option(
+		"--registry <dir>",
+		"path to the registry directory holding repos.yaml (defaults to GATEKEEPER_REGISTRY, then .gatekeeper.yml's registry:)",
+	)
+	.option(
+		"--yes",
+		"skip the interactive y/N confirmation before starting supervision (required when stdin is not a TTY)",
+		false,
+	)
+	.action(async (options) => {
+		process.exitCode = await runDispatchStart(options, process.cwd());
+	});
+
+dispatch
+	.command("status")
+	.description(
+		"Show every dispatch order's one-line summary, or (given an order id) one order's full detail: current/most " +
+			"recent run, log file paths, WAITING_COOLDOWN's resumable-at time (shown first), NEEDS_ATTENTION's next " +
+			"command (shown first), and any REVIEWER_VENDOR_CONFLICT warnings against roles-policy.yaml's reviewer " +
+			"tier. Read-only; never mutates an order. Exit codes: 0 normally; 2 for an unknown/malformed order id; 3 " +
+			"on any other dispatch store read fault; never 1.",
+	)
+	.argument("[order-id]", "order id (wo-...); omit to list every order")
+	.option("--json", "emit machine-readable JSON instead of the human-readable summary", false)
+	.action(async (orderId, options) => {
+		process.exitCode = await runDispatchStatus({ ...options, orderId }, process.cwd());
+	});
+
+dispatch
+	.command("logs")
+	.description(
+		"Print an order run's log file paths and their tail (last 50 lines each). --follow is deliberately not " +
+			"implemented -- tail the printed paths directly (e.g. `tail -f`) to watch a live run. Exit codes: 0 " +
+			"normally; 2 for an unknown/malformed order id, an order with no runs yet, or an unknown --run; 3 on " +
+			"any other dispatch store read fault; never 1.",
+	)
+	.argument("<order-id>", "order id (wo-...)")
+	.option("--run <rNNN>", "which run to show (defaults to the most recent run)")
+	.action(async (orderId, options) => {
+		process.exitCode = await runDispatchLogs({ ...options, orderId }, process.cwd());
+	});
+
+dispatch
+	.command("resume")
+	.description(
+		"Resume a WAITING_COOLDOWN order once its cooldown elapses (or immediately with --force), resume a " +
+			"NEEDS_ATTENTION order back to RUNNING (optionally with --agent naming a substitute CLI), or reconcile a " +
+			"RUNNING order whose previous supervisor process died: --wait waits for its process group to exit on its " +
+			"own, --kill terminates it now, --confirm-dead treats it as confirmed dead when its process group id was " +
+			"never durably recorded. A NEEDS_ATTENTION resume the supervisor cannot honor (total run cap already " +
+			"exhausted, or the frozen ladder has no unexhausted candidate and no --agent was given) is reported via " +
+			"its resumeHint rather than silently retried; the order stays NEEDS_ATTENTION (exit code 3). Exit codes: " +
+			"0 on a DELIVERED result, or when the order was already terminal (DELIVERED); 2 for an unknown/malformed " +
+			"order id or an unresolvable --agent; 3 on every other non-error outcome; never 1.",
+	)
+	.argument("<order-id>", "order id (wo-...)")
+	.option(
+		"--agent <cli>",
+		"substitute agent CLI for a NEEDS_ATTENTION resume: a name detectAgentClis finds right now is used " +
+			"directly, otherwise it falls back to the same .gatekeeper.yml/GATEKEEPER_AGENT_COMMAND/agents.yaml " +
+			"resolution `triage --run` uses (no effect outside NEEDS_ATTENTION)",
+	)
+	.addOption(
+		new Option("--wait", "wait for a live orphaned run's process group to exit on its own").conflicts([
+			"kill",
+			"confirmDead",
+		]),
+	)
+	.addOption(
+		new Option("--kill", "terminate a live orphaned run's process group now").conflicts(["wait", "confirmDead"]),
+	)
+	.addOption(
+		new Option(
+			"--confirm-dead",
+			"treat an orphaned run as confirmed dead even though its process group id was never durably recorded",
+		).conflicts(["wait", "kill"]),
+	)
+	.option("--force", "resume a WAITING_COOLDOWN order before its cooldown has elapsed", false)
+	.action(async (orderId, options) => {
+		process.exitCode = await runDispatchResume({ ...options, orderId }, process.cwd());
+	});
+
+dispatch
+	.command("cancel")
+	.description(
+		"Terminate an order's active run (if any) and mark it ABANDONED. An already-terminal order is a no-op (exit " +
+			"0). A PENDING order (never started) cannot be cancelled -- the dispatch state machine has no PENDING -> " +
+			"ABANDONED transition (see the T-20260720-07 deviation report); run `dispatch start` first. Exit codes: " +
+			"0 when the order was already terminal (or its active run had already delivered before cancel reached " +
+			"it); 2 for an unknown/malformed order id or a still-PENDING order; 3 once cancellation lands on " +
+			"ABANDONED, or when it could not complete; never 1.",
+	)
+	.argument("<order-id>", "order id (wo-...)")
+	.action(async (orderId) => {
+		process.exitCode = await runDispatchCancel({ orderId }, process.cwd());
 	});
 
 registerInitCommand(program);
