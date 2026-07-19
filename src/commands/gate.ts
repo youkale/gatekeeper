@@ -1,5 +1,13 @@
 import { readFileSync } from "node:fs";
 
+import {
+	ConfigDiscoveryError,
+	type DiscoveredConfig,
+	discoverConfig,
+	missingRegistryMessage,
+	resolveConfiguredField,
+	resolveRegistryOption,
+} from "../config/discover.js";
 import { formatRegistryIssue, RegistryParseError } from "../engine/registry.js";
 import type { ChangedFile, ContractHit, Registry, Verdict } from "../engine/types.js";
 import { evaluate } from "../engine/verdict.js";
@@ -33,7 +41,8 @@ import { renderExplain } from "../render/explain.js";
 
 export interface GateOptions {
 	pr: number;
-	registry: string;
+	/** Optional at the CLI level: resolved against GATEKEEPER_REGISTRY / .gatekeeper.yml before use — see runGate. */
+	registry?: string;
 	repo?: string;
 	json?: boolean;
 	explain?: boolean;
@@ -101,7 +110,8 @@ function describeError(error: unknown): string {
 		error instanceof RegistryReadError ||
 		error instanceof GitDiffError ||
 		error instanceof LanePresetReadError ||
-		error instanceof InfraError
+		error instanceof InfraError ||
+		error instanceof ConfigDiscoveryError
 	) {
 		return error.reason;
 	}
@@ -132,12 +142,18 @@ function isInfrastructureFailure(error: unknown): boolean {
 		error instanceof RegistryReadError ||
 		error instanceof GitDiffError ||
 		error instanceof LanePresetReadError ||
-		error instanceof InfraError
+		error instanceof InfraError ||
+		error instanceof ConfigDiscoveryError
 	);
 }
 
-async function resolveGateRepo(cwd: string, options: GateOptions, env: NodeJS.ProcessEnv): Promise<string> {
-	return resolveRepo(cwd, options.repo ?? env.GITHUB_REPOSITORY);
+async function resolveGateRepo(
+	cwd: string,
+	options: GateOptions,
+	env: NodeJS.ProcessEnv,
+	discovered: DiscoveredConfig | null,
+): Promise<string> {
+	return resolveRepo(cwd, resolveConfiguredField(options.repo, discovered, "repo") ?? env.GITHUB_REPOSITORY);
 }
 
 async function loadGateRegistry(registryDirectory: string, presetDirectory?: string): Promise<LoadedGateRegistry> {
@@ -496,8 +512,16 @@ export async function runGate(options: GateOptions, cwd: string, dependencies: G
 	const env = dependencies.env ?? process.env;
 	const commentAuthorLogin = dependencies.commentAuthorLogin ?? env.GATEKEEPER_COMMENT_AUTHOR;
 	try {
-		const repo = await resolveGateRepo(cwd, options, env);
-		const loaded = await loadGateRegistry(options.registry, dependencies.presetDirectory);
+		// Config discovery (.gatekeeper.yml) is infrastructure like the registry/GitHub
+		// providers below: a damaged config file degrades (fail-open) rather than blocking.
+		const discovered = await discoverConfig(cwd);
+		const registryPath = resolveRegistryOption({ cliValue: options.registry, discovered });
+		if (!registryPath) {
+			process.stderr.write(`${missingRegistryMessage("gate")}\n`);
+			return 2;
+		}
+		const repo = await resolveGateRepo(cwd, options, env, discovered);
+		const loaded = await loadGateRegistry(registryPath, dependencies.presetDirectory);
 		const provider = (dependencies.createProvider ?? ((providerOptions) => new GitHubProvider(providerOptions)))({
 			repo,
 		});

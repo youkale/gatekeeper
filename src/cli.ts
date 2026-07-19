@@ -4,11 +4,13 @@ import { fileURLToPath } from "node:url";
 
 import { Command, CommanderError, InvalidArgumentError, Option } from "commander";
 
+import { runAdopt } from "./commands/adopt.js";
 import { runAudit } from "./commands/audit.js";
 import { runCheck } from "./commands/check.js";
 import { rolesPolicyCapabilityCheck, runDoctor } from "./commands/doctor.js";
 import { runGate } from "./commands/gate.js";
 import { registerInitCommand } from "./commands/init.js";
+import { runProvision } from "./commands/provision.js";
 import { runStats } from "./commands/stats.js";
 import { runTriage } from "./commands/triage.js";
 import { runValidate } from "./commands/validate.js";
@@ -59,13 +61,16 @@ program.exitOverride();
 program
 	.command("check")
 	.description("Evaluate the current diff against the contract registry.")
-	.requiredOption("--registry <dir>", "path to the registry directory")
-	.option("--repo <org/name>", "explicit repo identity (defaults to the origin remote)")
+	.option(
+		"--registry <dir>",
+		"path to the registry directory (defaults to GATEKEEPER_REGISTRY, then .gatekeeper.yml's registry:)",
+	)
+	.option("--repo <org/name>", "explicit repo identity (defaults to .gatekeeper.yml's repo:, then the origin remote)")
 	.addOption(
-		new Option("--base <ref>", "diff base ref (defaults to auto-detected main/master)").conflicts([
-			"staged",
-			"workingTree",
-		]),
+		new Option(
+			"--base <ref>",
+			"diff base ref (defaults to .gatekeeper.yml's base:, then auto-detected main/master)",
+		).conflicts(["staged", "workingTree"]),
 	)
 	.addOption(
 		new Option("--staged", "diff staged changes instead of base...head")
@@ -79,7 +84,7 @@ program
 	)
 	.option("--json", "emit machine-readable verdict JSON on stdout", false)
 	.option("--explain", "render file -> glob -> contract -> policy provenance", false)
-	.option("--actor <name>", "explicit actor identity (defaults to git config user.name)")
+	.option("--actor <name>", "explicit actor identity (defaults to .gatekeeper.yml's actor:, then git config user.name)")
 	.option(
 		"--strict-infra",
 		"treat infrastructure/config faults as failures (exit 2) instead of fail-open (local debugging)",
@@ -92,18 +97,27 @@ program
 program
 	.command("validate")
 	.description("Validate the contract registry: schema check plus glob/foreign-key lint.")
-	.requiredOption("--registry <dir>", "path to the registry directory")
+	.option(
+		"--registry <dir>",
+		"path to the registry directory (defaults to GATEKEEPER_REGISTRY, then .gatekeeper.yml's registry:)",
+	)
 	.option("--strict", "treat warnings as failures (exit 1)", false)
 	.action(async (options) => {
-		process.exitCode = await runValidate(options);
+		process.exitCode = await runValidate(options, process.cwd());
 	});
 
 program
 	.command("gate")
 	.description("Evaluate a GitHub pull request and upsert its sticky gate verdict comment.")
 	.requiredOption("--pr <n>", "pull request number", positiveInteger)
-	.requiredOption("--registry <dir>", "path to the registry directory")
-	.option("--repo <org/name>", "explicit GitHub repository (defaults to GITHUB_REPOSITORY or origin)")
+	.option(
+		"--registry <dir>",
+		"path to the registry directory (defaults to GATEKEEPER_REGISTRY, then .gatekeeper.yml's registry:)",
+	)
+	.option(
+		"--repo <org/name>",
+		"explicit GitHub repository (defaults to .gatekeeper.yml's repo:, then GITHUB_REPOSITORY or origin)",
+	)
 	.option("--json", "emit the gate report as JSON on stdout", false)
 	.option("--explain", "include file -> glob -> contract -> policy provenance in the sticky comment", false)
 	.action(async (options) => {
@@ -113,8 +127,14 @@ program
 program
 	.command("doctor")
 	.description("Validate registry lanes and GitHub branch-protection required checks.")
-	.requiredOption("--registry <dir>", "path to the registry directory")
-	.option("--repo <org/name>", "explicit GitHub repository (defaults to GITHUB_REPOSITORY or origin)")
+	.option(
+		"--registry <dir>",
+		"path to the registry directory (defaults to GATEKEEPER_REGISTRY, then .gatekeeper.yml's registry:)",
+	)
+	.option(
+		"--repo <org/name>",
+		"explicit GitHub repository (defaults to .gatekeeper.yml's repo:, then GITHUB_REPOSITORY or origin)",
+	)
 	.option("--branch <name>", "protected branch (defaults to GITHUB_BASE_REF or main)")
 	.option("--workflow <path>", "workflow file or directory (defaults to .github/workflows)")
 	.option("--check-name <name>", "expected required check name (repeatable; bypasses workflow discovery)", collect, [])
@@ -126,7 +146,10 @@ program
 program
 	.command("audit")
 	.description("Check registry glob drift against local repository checkouts.")
-	.requiredOption("--registry <dir>", "path to the registry directory")
+	.option(
+		"--registry <dir>",
+		"path to the registry directory (defaults to GATEKEEPER_REGISTRY, then .gatekeeper.yml's registry:)",
+	)
 	.requiredOption(
 		"--repo-path <org/name=path>",
 		"map a registry repository to a local checkout (repeatable)",
@@ -142,7 +165,7 @@ program
 	.command("stats")
 	.description("Aggregate Gatekeeper ledger rounds from GitHub or a local JSONL file.")
 	.addOption(new Option("--source <source>", "ledger source").choices(["github", "local"]).default("local"))
-	.option("--repo <org/name>", "GitHub repository (required with --source github)")
+	.option("--repo <org/name>", "GitHub repository (required with --source github; defaults to .gatekeeper.yml's repo:)")
 	.option("--token <token>", "GitHub token (defaults to GITHUB_TOKEN)")
 	.option("--file <path>", "local JSONL ledger (defaults to .gatekeeper/ledger.jsonl)")
 	.option("--since <date>", "harvest merged GitHub PRs at or after this ISO date/time")
@@ -157,16 +180,61 @@ program
 		"Assemble a requirement-gate triage briefing for a GitHub issue, or post a completed judgement back to it.",
 	)
 	.requiredOption("--issue <n>", "issue number", positiveInteger)
-	.requiredOption("--repo <org/name>", "GitHub repository")
-	.requiredOption("--registry <dir>", "path to the registry directory")
+	.option("--repo <org/name>", "GitHub repository (defaults to .gatekeeper.yml's repo:)")
+	.option(
+		"--registry <dir>",
+		"path to the registry directory (defaults to GATEKEEPER_REGISTRY, then .gatekeeper.yml's registry:)",
+	)
 	.option("--post", "post a completed --verdict-file judgement back to the issue instead of printing a briefing", false)
 	.option("--verdict-file <path>", "path to a completed judgement JSON file (required with --post)")
-	.option("--actor <name>", "explicit actor identity recorded on the posted comment")
+	.option(
+		"--actor <name>",
+		"explicit actor identity recorded on the posted comment (defaults to .gatekeeper.yml's actor:)",
+	)
 	.action(async (options) => {
 		process.exitCode = await runTriage(options, process.cwd());
 	});
 
 registerInitCommand(program);
+
+program
+	.command("adopt")
+	.description(
+		"Register a repository with the contract registry located inside a control/hub checkout: write " +
+			".gatekeeper.yml at the target repo's root and upsert its entry into <registry>/repos.yaml.",
+	)
+	.argument("[path]", "target repo to adopt (defaults to the current directory)")
+	.requiredOption(
+		"--control <path>",
+		"control/hub repo path; the registry is located inside it (governance/registry, then registry, then the control repo itself)",
+	)
+	.option(
+		"--repo <org/name>",
+		"explicit repo identity (defaults to the origin remote); overrides .gatekeeper.yml's repo:",
+	)
+	.option("--force", "overwrite an existing .gatekeeper.yml", false)
+	.action(async (targetPath, options) => {
+		process.exitCode = await runAdopt({ ...options, path: targetPath }, process.cwd());
+	});
+
+program
+	.command("provision")
+	.description(
+		"Fan CI job / pre-push hook / AGENTS.md scaffolding out across every repo registered by `gatekeeper adopt`.",
+	)
+	.argument("[repos...]", "limit to these registered org/name repos (default: every registered repo)")
+	.option(
+		"--registry <path>",
+		"path to the registry directory holding repos.yaml (defaults to GATEKEEPER_REGISTRY, then .gatekeeper.yml's registry:)",
+	)
+	.option("--ci", "generate/update each repo's CI job (per its registered ci: provider)", false)
+	.option("--hooks", "install a fail-open pre-push hook in each repo", false)
+	.option("--agents-md", "add/update a Gatekeeper instruction block in each repo's AGENTS.md", false)
+	.option("--dry-run", "print what would be done per repo without writing anything", false)
+	.option("--force", "overwrite an existing pre-push hook or GitHub workflow copy", false)
+	.action(async (repos, options) => {
+		process.exitCode = await runProvision({ ...options, repos }, process.cwd());
+	});
 
 try {
 	await program.parseAsync(process.argv);

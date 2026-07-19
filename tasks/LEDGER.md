@@ -24,6 +24,10 @@
 
 | T-20260719-02 | 中立化 | agent 绑定纠偏 B：integrations/mcp MCP server（三工具，真实协议测试） | sonnet-coder | R1: claude FAIL(活体协议损坏复现)+grok FAIL(SDK 源码取证)同一并发缺陷；R2: claude PASS（真实 stdio 12 路并发零污染） | ✅ 验收提交 | records/T-20260719-02-mcp-server.md |
 
+| T-20260719-03 | 易用性 | 交互简化 A：配置发现 + adopt(--control 登记) + provision(总控批量落地)，中途三次用户设计修正全吸收 | sonnet-coder | R1: grok PASS(6nb 采 2) + claude FAIL(worktree ENOTDIR 整批崩溃，活体复现)；R2: claude PASS（common-dir 正解 + 批次纵深防御定性合规） | ✅ 验收提交 | records/T-20260719-03-usability.md |
+
+| T-20260719-04 | 易用性 | 交互简化 B：BYO agent runner（triage --run / init --run 直通用户声明的 agent 命令） | sonnet-coder | DISPATCH | 进行中 | - |
+
 ### 遗留债队列（活动，v1.1 候选）
 
 - [v1.1] enforce: hard 的真实前置：受信外部通道（GitHub App/webhook → repository_dispatch 触发默认分支 workflow）——workflow_run 桥接已实现但可被 PR 压制脉冲，仅 best-effort（T-11 裁决结论）

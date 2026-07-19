@@ -12,6 +12,7 @@
     "dist",
     "lanes.d",
     "schema",
+    "examples",
     "action.yml",
     "roles-policy.yaml"
   ],

@@ -1,4 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
+import path from "node:path";
 
 import picomatch from "picomatch";
 
@@ -136,6 +137,39 @@ export async function resolveRepo(cwd: string, explicitRepo?: string): Promise<s
 		throw new GitDiffError(`could not parse repo identity ("org/name") from origin remote URL: ${url}`);
 	}
 	return parsed;
+}
+
+/**
+ * Resolve the repository's working-tree root (`git rev-parse --show-toplevel`).
+ * Used by `gatekeeper adopt`, which writes `.gatekeeper.yml`/AGENTS.md/CI
+ * config/hooks at the repo root regardless of the subdirectory it is invoked
+ * from. Throws GitDiffError when `cwd` is not inside a Git working tree.
+ */
+export async function resolveRepoRoot(cwd: string): Promise<string> {
+	const result = await execGit(cwd, ["rev-parse", "--show-toplevel"]);
+	if (result.code !== 0) {
+		throw new GitDiffError(`not a Git working tree (git rev-parse --show-toplevel failed): ${result.stderr.trim()}`);
+	}
+	return result.stdout.trim();
+}
+
+/**
+ * Resolve the real directory hooks live in (`git rev-parse --git-common-dir`),
+ * not `<cwd>/.git`: in a linked worktree checkout, `.git` is a *file*
+ * containing a `gitdir:` pointer, not a directory, and hooks are shared from
+ * the main working tree's common dir regardless of which worktree a command
+ * runs from. Used by `gatekeeper provision`'s pre-push hook installer so it
+ * never assumes `<repo>/.git` is a directory it can `mkdir` into.
+ */
+export async function resolveGitCommonDir(cwd: string): Promise<string> {
+	const result = await execGit(cwd, ["rev-parse", "--git-common-dir"]);
+	if (result.code !== 0) {
+		throw new GitDiffError(
+			`could not resolve git common dir (git rev-parse --git-common-dir failed): ${result.stderr.trim()}`,
+		);
+	}
+	const raw = result.stdout.trim();
+	return path.isAbsolute(raw) ? raw : path.resolve(cwd, raw);
 }
 
 /** Resolve actor identity: explicit --actor wins, otherwise `git config user.name` (undefined if unset). */

@@ -3,6 +3,7 @@ import path from "node:path";
 
 import type { Command } from "commander";
 
+import { ConfigDiscoveryError, discoverConfig } from "../config/discover.js";
 import { renderInitBrief } from "../init/brief.js";
 import { RepoAccessError, scanRepos } from "../init/scan.js";
 
@@ -25,6 +26,21 @@ export interface InitOptions {
  * from an infrastructure hiccup here, only a human about to be handed misleading output.
  */
 export async function runInit(options: InitOptions, cwd: string): Promise<number> {
+	// `init` consumes no .gatekeeper.yml field (it has no --registry/--repo/--base/--actor
+	// equivalent — it drafts a registry, it doesn't consume one), but config discovery
+	// still runs here for the same fail-loud reason as validate/doctor/triage: a damaged
+	// config file nearby is worth surfacing loudly to a local-authoring tool rather than
+	// silently ignoring it.
+	try {
+		await discoverConfig(cwd);
+	} catch (error) {
+		if (!(error instanceof ConfigDiscoveryError)) {
+			throw error;
+		}
+		process.stderr.write(`gatekeeper init: ${error.reason}\n`);
+		return 2;
+	}
+
 	const repos = options.repos ?? [];
 	if (repos.length === 0) {
 		process.stderr.write("gatekeeper init: at least one --repos <path> is required\n");

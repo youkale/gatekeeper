@@ -29,7 +29,66 @@ npm link
 gatekeeper --help
 ```
 
-Create a registry with one `policy.yaml` and one YAML file per contract under `contracts/`, following [the specification](docs/SPEC.md). Then validate it and inspect a local diff:
+Create a registry with one `policy.yaml` and one YAML file per contract under `contracts/`, following [the specification](docs/SPEC.md). The rest of this section is the three-stage adopt path: **adopt** each repo once, **provision** local scaffolding for all of them from a hub checkout, then use every other command with zero repeated flags from inside an adopted repo.
+
+### 1. Adopt each repo, once
+
+`gatekeeper adopt` locates the registry inside a **control** (hub) checkout — the directory that has your registry checked out, typically at `governance/registry` or `registry` — and registers one **target** repo against it: it writes a minimal `.gatekeeper.yml` at the target repo's root and upserts that repo's entry into `<registry>/repos.yaml`.
+
+```bash
+# from inside the repo you're adopting (or pass its path as the last argument)
+gatekeeper adopt --control /work/governance-hub
+```
+
+`--control` is probed in order for a `policy.yaml`: `<control>/governance/registry`, then `<control>/registry`, then `<control>` itself. A target repo may not be identical to, contain, or be nested inside the control repo — a control repo governs itself through its own self-gate workflow, not through `adopt`.
+
+`.gatekeeper.yml` (written at the target repo root):
+
+```yaml
+apiVersion: gatekeeper/v1
+registry: ../governance-hub/governance/registry # relative to this file's directory when possible
+repo: your-org/your-repo                         # optional; only written when --repo overrides the origin remote
+base: origin/main                                # optional; hand-edit to set check's default base
+actor: yourname                                  # optional; hand-edit to set an explicit actor identity
+```
+
+Every other command resolves `--registry`/`--repo`/`--base`/`--actor` in this order: an explicit CLI flag, then (registry only) the `GATEKEEPER_REGISTRY` environment variable, then `.gatekeeper.yml` found by walking up from the current directory (stopping at the Git root), then each command's own prior default (e.g. `check`'s local `main`/`master` auto-detection).
+
+`<registry>/repos.yaml` (written next to the located registry; workspace-specific — re-run `adopt` after cloning the workspace onto another machine):
+
+```yaml
+apiVersion: gatekeeper/v1
+repos:
+  - repo: your-org/your-repo
+    path: /work/your-repo   # local checkout path on this machine
+    ci: github               # gitlab | github | none, auto-detected from the target repo
+    adopted_at: 2026-07-19T00:00:00.000Z
+```
+
+### 2. Provision scaffolding from the hub
+
+From anywhere the registry can be discovered (typically the control repo itself, passing `--registry` explicitly since a control repo never adopts itself), fan CI job / pre-push hook / AGENTS.md scaffolding out across every registered repo:
+
+```bash
+gatekeeper provision --registry /work/governance-hub/governance/registry
+```
+
+With no `--ci`/`--hooks`/`--agents-md` flag, `provision` does all three for every registered repo whose local `path` still exists (a missing checkout is skipped with a warning, not a hard failure). Pass repo names to limit the batch, and `--dry-run` to preview without writing:
+
+```bash
+gatekeeper provision your-org/your-repo --ci --dry-run
+```
+
+### 3. Zero-flag daily use
+
+Inside an adopted repo, most commands need no flags at all:
+
+```bash
+gatekeeper check --working-tree --explain
+```
+
+<details>
+<summary>Manual setup (no adopt/provision): validate + check with explicit flags</summary>
 
 ```bash
 gatekeeper validate --registry /path/to/registry --strict
@@ -43,18 +102,24 @@ gatekeeper check \
 
 `check` compares `<base>...HEAD` by default. Use `--staged` for index-only checks or `--working-tree` for tracked staged and unstaged changes against `HEAD`. These three diff modes are mutually exclusive.
 
+</details>
+
 ### Commands
 
 | Command | Purpose |
 | --- | --- |
-| `gatekeeper validate --registry <dir> [--strict]` | Validate YAML/schema, level and lane references, regexes, preset collisions, overly broad bare `**` globs, and unusable frozen-mirror allowlists. `--strict` turns warnings into exit 1. |
-| `gatekeeper check --registry <dir> [--repo] [--base\|--staged\|--working-tree] [--json] [--explain]` | Evaluate a local Git diff and emit the engine Verdict. A confirmed block exits 1; infrastructure/configuration degradation exits 0 by default with a loud warning. `--strict-infra` is available for local debugging. |
-| `gatekeeper gate --pr <n> --registry <dir> [--repo] [--json] [--explain]` | Evaluate a GitHub pull request, collect only the lane evidence required by touched contracts, and upsert the sticky verdict/ledger comment. Unmet blocking policy exits 1. |
-| `gatekeeper doctor --registry <dir> [--repo] [--branch] [--workflow] [--check-name <name>...]` | Validate the registry and lane presets, discover gate job names, verify branch-protection required checks, and report `roles-policy.yaml` model-tier availability in the current pi configuration. |
-| `gatekeeper audit --registry <dir> --repo-path org/name=/checkout [...] [--json]` | Compare every authority/consumer include glob with files in mapped local checkouts. Confirmed drift exits 1; an invalid registry, mapping, or checkout exits 2. |
+| `gatekeeper adopt --control <hub> [path]` | Register a repo (defaulting to the current directory) with the registry located inside `--control`: write `.gatekeeper.yml` at its root and upsert its entry into `<registry>/repos.yaml`. Refuses to run outside a Git working tree or when the target/control repos overlap. |
+| `gatekeeper provision [repos...] [--ci] [--hooks] [--agents-md] [--dry-run] [--force]` | Fan CI job injection, a fail-open pre-push hook, and an AGENTS.md instruction block out across every repo in `repos.yaml` (or just the named ones). No flag means all three. |
+| `gatekeeper validate [--registry <dir>] [--strict]` | Validate YAML/schema, level and lane references, regexes, preset collisions, overly broad bare `**` globs, and unusable frozen-mirror allowlists. `--strict` turns warnings into exit 1. |
+| `gatekeeper check [--registry <dir>] [--repo] [--base\|--staged\|--working-tree] [--json] [--explain]` | Evaluate a local Git diff and emit the engine Verdict. A confirmed block exits 1; infrastructure/configuration degradation exits 0 by default with a loud warning. `--strict-infra` is available for local debugging. |
+| `gatekeeper gate --pr <n> [--registry <dir>] [--repo] [--json] [--explain]` | Evaluate a GitHub pull request, collect only the lane evidence required by touched contracts, and upsert the sticky verdict/ledger comment. Unmet blocking policy exits 1. |
+| `gatekeeper doctor [--registry <dir>] [--repo] [--branch] [--workflow] [--check-name <name>...]` | Validate the registry and lane presets, discover gate job names, verify branch-protection required checks, and report `roles-policy.yaml` model-tier availability in the current pi configuration. |
+| `gatekeeper audit [--registry <dir>] --repo-path org/name=/checkout [...] [--json]` | Compare every authority/consumer include glob with files in mapped local checkouts. Confirmed drift exits 1; an invalid registry, mapping, or checkout exits 2. |
 | `gatekeeper stats [--source local\|github] [--file] [--repo] [--since] [--json]` | Aggregate PR gate ledger rounds by contract, verdict/override, and linked issue. Local input defaults to `.gatekeeper/ledger.jsonl`; GitHub input harvests merged PR sticky comments. |
 | `gatekeeper init --repos <path>... --out <dir>` | Deterministically scan local checkouts for candidate cross-repo contract signals and write `scan.json` plus `init-brief.md`. It makes no model or network call; drafting is a separate pi or human step. |
-| `gatekeeper triage --issue <n> --repo org/name --registry <dir>` | Fetch an issue and print a zero-model requirement-gate briefing with registry impact hints and role/model candidates. Add `--post --verdict-file <file>` to validate and record a completed judgment, sync its label/comment, and append `.gatekeeper/triage-ledger.jsonl`. |
+| `gatekeeper triage --issue <n> --repo org/name [--registry <dir>]` | Fetch an issue and print a zero-model requirement-gate briefing with registry impact hints and role/model candidates. Add `--post --verdict-file <file>` to validate and record a completed judgment, sync its label/comment, and append `.gatekeeper/triage-ledger.jsonl`. |
+
+`--registry` is validated before anything else runs; when omitted, each command reports it needs one of `--registry`, `GATEKEEPER_REGISTRY`, or a discoverable `.gatekeeper.yml`. `adopt`/`validate`/`doctor`/`audit`/`triage`/`init`/`provision` fail loud (non-zero exit) on a damaged `.gatekeeper.yml`; `check`/`gate` degrade (fail open, per [the fail-direction commitment](#the-fail-direction-commitment)) since they sit on the merge path.
 
 Typical local authoring loop:
 
@@ -213,7 +278,7 @@ An npm install of `pi-gatekeeper` is not yet self-contained because the extensio
 
 **Infrastructure failures never block merges.** Network faults, unavailable GitHub APIs, unreadable runtime state, and equivalent gate infrastructure failures produce a loud degraded result and a non-blocking exit. A hard block is reserved for a successfully evaluated governance decision.
 
-Registry health and local authoring commands such as `validate`, `audit`, `init`, and triage verdict-file validation still fail loudly when their own inputs are invalid; they are not merge decisions. Use `check --strict-infra` only when you deliberately want local infrastructure/configuration faults to return a non-zero debugging exit.
+Registry health and local authoring commands such as `adopt`, `provision`, `validate`, `doctor`, `audit`, `init`, and triage verdict-file validation still fail loudly when their own inputs (including a damaged `.gatekeeper.yml`) are invalid; they are not merge decisions. Use `check --strict-infra` only when you deliberately want local infrastructure/configuration faults to return a non-zero debugging exit.
 
 ## License
 

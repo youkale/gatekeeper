@@ -1,10 +1,17 @@
+import {
+	ConfigDiscoveryError,
+	discoverConfig,
+	missingRegistryMessage,
+	resolveRegistryOption,
+} from "../config/discover.js";
 import { formatRegistryIssue, RegistryParseError } from "../engine/registry.js";
 import type { Registry, RegistryIssue } from "../engine/types.js";
 import { LanePresetParseError, LanePresetReadError, loadRegistryWithLanePresets } from "../gate/presets.js";
 import { RegistryReadError } from "../providers/fsregistry.js";
 
 export interface ValidateOptions {
-	registry: string;
+	/** Optional at the CLI level: resolved against GATEKEEPER_REGISTRY / .gatekeeper.yml before use — see runValidate. */
+	registry?: string;
 	strict?: boolean;
 	/**
 	 * Output sinks. Optional and additive: default to the real
@@ -68,13 +75,38 @@ function lintRegistry(registry: Registry): RegistryIssue[] {
 	return warnings;
 }
 
-export async function runValidate(options: ValidateOptions): Promise<number> {
+/**
+ * `cwd` defaults to `process.cwd()` (additive, CLI-default-preserving — same
+ * spirit as the `stdout`/`stderr` sinks above) so existing callers that only
+ * pass `options` (e.g. integrations/mcp's runGatekeeperValidate, which always
+ * supplies an explicit `registry`) are unaffected.
+ */
+export async function runValidate(options: ValidateOptions, cwd: string = process.cwd()): Promise<number> {
 	const writeStdout = options.stdout ?? ((chunk: string) => void process.stdout.write(chunk));
 	const writeStderr = options.stderr ?? ((chunk: string) => void process.stderr.write(chunk));
 
+	// Config discovery (.gatekeeper.yml) is a local-authoring-command input like
+	// the registry directory itself: validate fails loud (exit 2) on damage
+	// instead of degrading, unlike check/gate.
+	const discovered = await discoverConfig(cwd).catch((error: unknown) => {
+		if (error instanceof ConfigDiscoveryError) {
+			writeStderr(`gatekeeper validate: ${error.reason}\n`);
+			return "invalid" as const;
+		}
+		throw error;
+	});
+	if (discovered === "invalid") {
+		return 2;
+	}
+	const registryPath = resolveRegistryOption({ cliValue: options.registry, discovered });
+	if (!registryPath) {
+		writeStderr(`${missingRegistryMessage("validate")}\n`);
+		return 2;
+	}
+
 	let loaded: Awaited<ReturnType<typeof loadRegistryWithLanePresets>>;
 	try {
-		loaded = await loadRegistryWithLanePresets(options.registry);
+		loaded = await loadRegistryWithLanePresets(registryPath);
 	} catch (error) {
 		if (error instanceof RegistryParseError) {
 			for (const issue of error.issues) {

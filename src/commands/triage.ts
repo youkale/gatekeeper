@@ -1,6 +1,13 @@
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
+import {
+	ConfigDiscoveryError,
+	discoverConfig,
+	missingRegistryMessage,
+	resolveConfiguredField,
+	resolveRegistryOption,
+} from "../config/discover.js";
 import { formatRegistryIssue, RegistryParseError } from "../engine/registry.js";
 import type { Registry } from "../engine/types.js";
 import { LanePresetParseError, LanePresetReadError, loadRegistryWithLanePresets } from "../gate/presets.js";
@@ -41,8 +48,10 @@ import {
 
 export interface TriageOptions {
 	issue: number;
-	repo: string;
-	registry: string;
+	/** Optional at the CLI level: resolved against .gatekeeper.yml before use — see runTriage. */
+	repo?: string;
+	/** Optional at the CLI level: resolved against GATEKEEPER_REGISTRY / .gatekeeper.yml before use — see runTriage. */
+	registry?: string;
 	post?: boolean;
 	verdictFile?: string;
 	actor?: string;
@@ -66,7 +75,12 @@ function describeError(error: unknown): string {
 	if (error instanceof RegistryParseError) {
 		return error.issues.map(formatRegistryIssue).join("; ");
 	}
-	if (error instanceof RegistryReadError || error instanceof LanePresetReadError || error instanceof InfraError) {
+	if (
+		error instanceof RegistryReadError ||
+		error instanceof LanePresetReadError ||
+		error instanceof InfraError ||
+		error instanceof ConfigDiscoveryError
+	) {
 		return error.reason;
 	}
 	if (error instanceof LanePresetParseError) {
@@ -77,6 +91,12 @@ function describeError(error: unknown): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** TriageOptions with `repo`/`registry` narrowed to `string` once runTriage has resolved them (CLI flag / .gatekeeper.yml / usage-error exit). */
+interface ResolvedTriageOptions extends Omit<TriageOptions, "repo" | "registry"> {
+	repo: string;
+	registry: string;
 }
 
 const VALID_DECISIONS = new Set<TriageDecision>(["accepted", "rejected", "needs-info"]);
@@ -258,7 +278,7 @@ async function resolveTierSelections(
 }
 
 async function runTriageBrief(
-	options: TriageOptions,
+	options: ResolvedTriageOptions,
 	cwd: string,
 	key: string,
 	registry: Registry,
@@ -353,7 +373,7 @@ async function syncDecisionLabel(
 }
 
 async function runTriagePost(
-	options: TriageOptions,
+	options: ResolvedTriageOptions,
 	cwd: string,
 	key: string,
 	registry: Registry,
@@ -464,11 +484,44 @@ export async function runTriage(
 	cwd: string,
 	dependencies: TriageDependencies = {},
 ): Promise<number> {
-	const key = `${options.repo}#${options.issue}`;
+	// Config discovery (.gatekeeper.yml) is a local-authoring-command input like
+	// the registry directory itself: triage fails loud on damage, not the
+	// check/gate degrade path.
+	let discovered: Awaited<ReturnType<typeof discoverConfig>>;
+	try {
+		discovered = await discoverConfig(cwd);
+	} catch (error) {
+		if (!(error instanceof ConfigDiscoveryError)) {
+			throw error;
+		}
+		process.stderr.write(`gatekeeper triage: ${describeError(error)}\n`);
+		return 1;
+	}
+
+	const registryPath = resolveRegistryOption({ cliValue: options.registry, discovered });
+	if (!registryPath) {
+		process.stderr.write(`${missingRegistryMessage("triage")}\n`);
+		return 2;
+	}
+	const repo = resolveConfiguredField(options.repo, discovered, "repo");
+	if (!repo) {
+		process.stderr.write(
+			'gatekeeper triage: --repo is required; provide --repo <org/name> or add a .gatekeeper.yml with a "repo:" field.\n',
+		);
+		return 2;
+	}
+	const effectiveOptions: ResolvedTriageOptions = {
+		...options,
+		registry: registryPath,
+		repo,
+		actor: resolveConfiguredField(options.actor, discovered, "actor"),
+	};
+
+	const key = `${effectiveOptions.repo}#${effectiveOptions.issue}`;
 
 	let loaded: Awaited<ReturnType<typeof loadRegistryWithLanePresets>>;
 	try {
-		loaded = await loadRegistryWithLanePresets(options.registry, dependencies.presetDirectory);
+		loaded = await loadRegistryWithLanePresets(registryPath, dependencies.presetDirectory);
 	} catch (error) {
 		if (
 			error instanceof RegistryParseError ||
@@ -489,7 +542,7 @@ export async function runTriage(
 	let provider: TriageProvider;
 	try {
 		provider = (dependencies.createProvider ?? ((providerOptions) => new GitHubProvider(providerOptions)))({
-			repo: options.repo,
+			repo,
 		});
 	} catch (error) {
 		if (!(error instanceof InfraError)) {
@@ -499,7 +552,7 @@ export async function runTriage(
 		return 2;
 	}
 
-	return options.post
-		? runTriagePost(options, cwd, key, loaded.registry, provider, dependencies)
-		: runTriageBrief(options, cwd, key, loaded.registry, provider, dependencies);
+	return effectiveOptions.post
+		? runTriagePost(effectiveOptions, cwd, key, loaded.registry, provider, dependencies)
+		: runTriageBrief(effectiveOptions, cwd, key, loaded.registry, provider, dependencies);
 }

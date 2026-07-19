@@ -4,6 +4,13 @@ import path from "node:path";
 
 import { parseDocument } from "yaml";
 
+import {
+	ConfigDiscoveryError,
+	discoverConfig,
+	missingRegistryMessage,
+	resolveConfiguredField,
+	resolveRegistryOption,
+} from "../config/discover.js";
 import { formatRegistryIssue, RegistryParseError } from "../engine/registry.js";
 import { LanePresetParseError, LanePresetReadError, loadRegistryWithLanePresets } from "../gate/presets.js";
 import { RegistryReadError } from "../providers/fsregistry.js";
@@ -19,7 +26,8 @@ import {
 } from "../roles/policy.js";
 
 export interface DoctorOptions {
-	registry: string;
+	/** Optional at the CLI level: resolved against GATEKEEPER_REGISTRY / .gatekeeper.yml before use — see runDoctor. */
+	registry?: string;
 	repo?: string;
 	branch?: string;
 	workflow?: string;
@@ -359,9 +367,28 @@ export async function runDoctor(
 	cwd: string,
 	dependencies: DoctorDependencies = {},
 ): Promise<number> {
+	// Config discovery (.gatekeeper.yml) is a local-authoring-command input like
+	// the registry directory itself: doctor fails loud on damage (same failure()
+	// + exit 1 treatment as a broken registry), not the check/gate degrade path.
+	let discovered: Awaited<ReturnType<typeof discoverConfig>>;
+	try {
+		discovered = await discoverConfig(cwd);
+	} catch (error) {
+		if (error instanceof ConfigDiscoveryError) {
+			failure(error.reason);
+			return 1;
+		}
+		throw error;
+	}
+	const registryPath = resolveRegistryOption({ cliValue: options.registry, discovered });
+	if (!registryPath) {
+		failure(missingRegistryMessage("doctor"));
+		return 2;
+	}
+
 	let validated: Awaited<ReturnType<typeof validateRegistry>>;
 	try {
-		validated = await validateRegistry(options.registry, dependencies.presetDirectory);
+		validated = await validateRegistry(registryPath, dependencies.presetDirectory);
 	} catch (error) {
 		if (error instanceof RegistryParseError || error instanceof LanePresetParseError) {
 			failure(describeError(error));
@@ -415,7 +442,10 @@ export async function runDoctor(
 
 	const env = dependencies.env ?? process.env;
 	try {
-		const repo = await resolveRepo(cwd, options.repo ?? env.GITHUB_REPOSITORY);
+		const repo = await resolveRepo(
+			cwd,
+			resolveConfiguredField(options.repo, discovered, "repo") ?? env.GITHUB_REPOSITORY,
+		);
 		const branch = options.branch ?? env.GITHUB_BASE_REF ?? "main";
 		const provider = (dependencies.createProvider ?? ((providerOptions) => new GitHubProvider(providerOptions)))({
 			repo,

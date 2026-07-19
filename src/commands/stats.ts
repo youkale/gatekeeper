@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
+import { discoverConfig, resolveConfiguredField } from "../config/discover.js";
 import type { GitHubFetch } from "../providers/github.js";
 import { COMMENT_MARKER, type GatekeeperLedger } from "../render/comment.js";
 
@@ -469,13 +470,22 @@ export async function runStats(
 	dependencies: StatsDependencies = {},
 ): Promise<number> {
 	try {
+		// Config discovery (.gatekeeper.yml) only ever fills in `repo` here (stats
+		// has no registry option); a damaged config file is fail-loud like every
+		// other stats input error below.
+		const discovered = await discoverConfig(cwd);
+		const effectiveOptions: StatsOptions = {
+			...options,
+			repo: resolveConfiguredField(options.repo, discovered, "repo"),
+		};
+
 		let parsed: ParsedLedgers;
 		let totalPrs: number | undefined;
-		if (options.source === "github") {
-			const harvested = await githubLedgers(options, dependencies);
+		if (effectiveOptions.source === "github") {
+			const harvested = await githubLedgers(effectiveOptions, dependencies);
 			parsed = harvested.parsed;
 			totalPrs = harvested.totalPrs;
-		} else if (options.source === "local") {
+		} else if (effectiveOptions.source === "local") {
 			if (options.since !== undefined) {
 				throw new StatsError("--since is supported only with --source github");
 			}

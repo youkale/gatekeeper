@@ -1,3 +1,10 @@
+import {
+	ConfigDiscoveryError,
+	discoverConfig,
+	missingRegistryMessage,
+	resolveConfiguredField,
+	resolveRegistryOption,
+} from "../config/discover.js";
 import { formatRegistryIssue, RegistryParseError } from "../engine/registry.js";
 import type { Registry } from "../engine/types.js";
 import { evaluate } from "../engine/verdict.js";
@@ -14,7 +21,8 @@ import {
 import { renderDegradedJson, renderExplain, renderSummary, renderVerdictJson } from "../render/explain.js";
 
 export interface CheckOptions {
-	registry: string;
+	/** Optional at the CLI level: resolved against GATEKEEPER_REGISTRY / .gatekeeper.yml before use — see runCheck. */
+	registry?: string;
 	repo?: string;
 	base?: string;
 	staged?: boolean;
@@ -29,7 +37,7 @@ function describeCheckError(error: unknown): string {
 	if (error instanceof RegistryParseError) {
 		return error.issues.map(formatRegistryIssue).join("; ");
 	}
-	if (error instanceof RegistryReadError || error instanceof GitDiffError) {
+	if (error instanceof RegistryReadError || error instanceof GitDiffError || error instanceof ConfigDiscoveryError) {
 		return error.reason;
 	}
 	if (error instanceof LanePresetReadError) {
@@ -59,10 +67,26 @@ function degrade(reason: string, options: CheckOptions): number {
 }
 
 export async function runCheck(options: CheckOptions, cwd: string): Promise<number> {
+	// Config discovery (.gatekeeper.yml) is infrastructure like the registry/git
+	// providers below: a damaged config file degrades (fail-open) rather than
+	// blocking, same as a damaged registry directory.
+	let discovered: Awaited<ReturnType<typeof discoverConfig>>;
+	try {
+		discovered = await discoverConfig(cwd);
+	} catch (error) {
+		return degrade(describeCheckError(error), options);
+	}
+
+	const registryPath = resolveRegistryOption({ cliValue: options.registry, discovered });
+	if (!registryPath) {
+		process.stderr.write(`${missingRegistryMessage("check")}\n`);
+		return 2;
+	}
+
 	let registry: Registry;
 	let laneConflicts: Awaited<ReturnType<typeof loadRegistryWithLanePresets>>["conflicts"];
 	try {
-		const loaded = await loadRegistryWithLanePresets(options.registry);
+		const loaded = await loadRegistryWithLanePresets(registryPath);
 		registry = loaded.registry;
 		laneConflicts = loaded.conflicts;
 	} catch (error) {
@@ -71,16 +95,19 @@ export async function runCheck(options: CheckOptions, cwd: string): Promise<numb
 
 	let repo: string;
 	try {
-		repo = await resolveRepo(cwd, options.repo);
+		repo = await resolveRepo(cwd, resolveConfiguredField(options.repo, discovered, "repo"));
 	} catch (error) {
 		return degrade(describeCheckError(error), options);
 	}
 
-	const actor = await resolveActor(cwd, options.actor);
+	const actor = await resolveActor(cwd, resolveConfiguredField(options.actor, discovered, "actor"));
 
 	let changedFiles: Awaited<ReturnType<typeof getChangedFiles>>;
 	try {
-		const base = options.staged || options.workingTree ? undefined : await resolveBaseRef(cwd, options.base);
+		const base =
+			options.staged || options.workingTree
+				? undefined
+				: await resolveBaseRef(cwd, resolveConfiguredField(options.base, discovered, "base"));
 		const rangeOptions = { base, staged: options.staged, workingTree: options.workingTree };
 		const withoutPatches = await getChangedFiles(cwd, rangeOptions);
 		changedFiles = await attachPatches(cwd, withoutPatches, registry.contracts, rangeOptions);

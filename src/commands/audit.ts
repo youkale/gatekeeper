@@ -4,12 +4,19 @@ import path from "node:path";
 
 import picomatch from "picomatch";
 
+import {
+	ConfigDiscoveryError,
+	discoverConfig,
+	missingRegistryMessage,
+	resolveRegistryOption,
+} from "../config/discover.js";
 import { formatRegistryIssue, parseRegistry, RegistryParseError } from "../engine/registry.js";
 import type { Contract, Registry } from "../engine/types.js";
 import { RegistryReadError, readRegistryFiles } from "../providers/fsregistry.js";
 
 export interface AuditOptions {
-	registry: string;
+	/** Optional at the CLI level: resolved against GATEKEEPER_REGISTRY / .gatekeeper.yml before use — see runAudit. */
+	registry?: string;
 	repoPath?: string[];
 	json?: boolean;
 }
@@ -46,7 +53,7 @@ function describeError(error: unknown): string {
 	if (error instanceof RegistryParseError) {
 		return error.issues.map(formatRegistryIssue).join("; ");
 	}
-	if (error instanceof RegistryReadError || error instanceof AuditError) {
+	if (error instanceof RegistryReadError || error instanceof AuditError || error instanceof ConfigDiscoveryError) {
 		return error.reason;
 	}
 	return error instanceof Error ? error.message : String(error);
@@ -189,7 +196,20 @@ function emitReport(report: AuditReport, json: boolean): void {
  */
 export async function runAudit(options: AuditOptions, cwd: string): Promise<number> {
 	try {
-		const files = await readRegistryFiles(options.registry);
+		// Config discovery (.gatekeeper.yml) is a local-authoring-command input like
+		// the registry directory itself: a damaged config file is fail-loud (exit
+		// 2), same as any other audit input error below.
+		const discovered = await discoverConfig(cwd);
+		const registryPath = resolveRegistryOption({ cliValue: options.registry, discovered });
+		if (!registryPath) {
+			const reason = missingRegistryMessage("audit");
+			if (options.json) {
+				process.stdout.write(`${JSON.stringify({ error: true, reason })}\n`);
+			}
+			process.stderr.write(`${reason}\n`);
+			return 2;
+		}
+		const files = await readRegistryFiles(registryPath);
 		const registry = parseRegistry(files);
 		const repoPaths = parseRepoPaths(options.repoPath ?? [], cwd);
 		const report = await auditRegistryGlobs(registry, repoPaths);
