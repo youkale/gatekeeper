@@ -49,6 +49,9 @@
 
 | T-20260720-04 | 复杂编码（准标准面） | dispatch C 包：结局分类器 + RESULT.json schema + 交付证据检查（设计 §4/§6/拆解表C） | codex | codex 内审 2 轮 + 外审 claude(opus)/grok 双 PASS；AGENT_ERROR 放宽偏离项经改裁驳回 | ✅ 验收提交（716 测试） | tasks/records/T-20260720-04-classifier-evidence.md |
 
+| T-20260720-05 | 缺陷修复 | filelock 补审返工：marker 记 owner + 恢复文案静默前置 + lockPath symlink fail-closed（codex 补审 2 blocker） | sonnet-coder | claude(opus)+grok 双 PASS（攻击场景可执行重放核销） | ✅ 验收提交 | tasks/records/T-20260720-05-filelock-rework.md |
+| T-20260720-06 | 复杂编码 | dispatch D 包：监督循环 + 阶梯 + cooldown + 交接合成 + git 工作区协议（设计最难包，拆解表D） | codex | DISPATCH | 进行中 | - |
+
 ### 遗留债队列（活动，v1.1 候选）
 
 - [接入信号] init-control 给总控仓自身写 .gatekeeper.yml（hub 侧零参数）

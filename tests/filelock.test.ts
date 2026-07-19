@@ -166,6 +166,51 @@ describe("withFileLock (C3): serializes concurrent critical sections", () => {
 		expect(reclaimCalls).toBeGreaterThanOrEqual(2);
 	});
 
+	it("writes the reclaiming waiter's own (pid, started_at) into the reclaim marker -- so a paused-after-verify reclaimer's marker can be told apart from a truly orphaned one by checking that pid's liveness", async () => {
+		const { writeFile, readFile } = await import("node:fs/promises");
+		const base = await makeTmpDir("gatekeeper-filelock-marker-owner-");
+		const lockPath = path.join(base, "target.lock");
+		// PID 999999 is virtually guaranteed not to be a live process on any
+		// real machine or CI runner.
+		await writeFile(lockPath, "999999", "utf8");
+
+		// `beforeReclaimDelete` fires exactly in the "paused after final
+		// verification, before delete" window F1 is about: the reclaim winner
+		// has already written its own identity into the marker and confirmed
+		// (dev, ino, pid[, nonce]) still matches -- this is the last point
+		// before the destructive `rm(lockPath)`. Reading the marker's content
+		// here, from outside this waiter, is exactly what a human operator
+		// reaching acquireLock's "reclaim is stuck" timeout message would do.
+		let observedMarkerContent: string | undefined;
+		const beforeReclaimDelete = async (markerPath: string) => {
+			observedMarkerContent = await readFile(markerPath, "utf8");
+		};
+
+		let ran = false;
+		await withFileLock(
+			lockPath,
+			async () => {
+				ran = true;
+			},
+			{ beforeReclaimDelete },
+		);
+
+		expect(ran).toBe(true);
+		expect(observedMarkerContent).toBeDefined();
+		const [pidLine, startedAtLine] = (observedMarkerContent ?? "").split("\n");
+		expect(Number.parseInt(pidLine ?? "", 10)).toBe(process.pid);
+		expect(() => new Date(startedAtLine ?? "")).not.toThrow();
+		expect(Number.isNaN(new Date(startedAtLine ?? "").getTime())).toBe(false);
+		// The recorded pid is this test process's own pid, which is (by
+		// definition) alive for the duration of this test -- demonstrating
+		// that a human (or, here, a `process.kill(pid, 0)` stand-in for a
+		// shell `kill -0 <pid>`) inspecting a marker's content while its
+		// reclaimer is merely paused can correctly tell "still in progress,
+		// do not touch" apart from "orphaned, safe to clean up" instead of
+		// guessing from an empty, owner-less marker.
+		expect(() => process.kill(process.pid, 0)).not.toThrow();
+	});
+
 	it("times out with a 'held by a live process' message when the recorded holder is genuinely alive", async () => {
 		const { writeFile } = await import("node:fs/promises");
 		const base = await makeTmpDir("gatekeeper-filelock-timeout-live-");
@@ -186,7 +231,7 @@ describe("withFileLock (C3): serializes concurrent critical sections", () => {
 		expect(message).toContain("held by a live process");
 	});
 
-	it("times out with a distinct, non-misleading message pointing at the exact marker path when the holder is dead but reclaim is stuck behind another waiter's marker", async () => {
+	it("times out with a distinct, non-misleading, two-phase-recovery message pointing at the exact marker path when the holder is dead but reclaim is stuck behind another waiter's marker", async () => {
 		const { writeFile, stat: statFile } = await import("node:fs/promises");
 		const base = await makeTmpDir("gatekeeper-filelock-timeout-blocked-");
 		const lockPath = path.join(base, "target.lock");
@@ -195,12 +240,13 @@ describe("withFileLock (C3): serializes concurrent critical sections", () => {
 		await writeFile(lockPath, "999999", "utf8");
 		const info = await statFile(lockPath, { bigint: true });
 		const markerPath = `${lockPath}.stale-${info.dev}-${info.ino}`;
-		// Simulate a reclaimer that won the marker and then crashed (or hung)
-		// before deleting or cleaning it up: every attempt below observes the
-		// same dead identity, races for the same marker, and loses to this
-		// pre-existing marker every time -- reclaim is stuck, but the holder is
-		// definitely not alive, so the error must say so accurately.
-		await writeFile(markerPath, "", "utf8");
+		// Simulate a reclaimer that won the marker (recording its own pid, per
+		// F1) and then crashed (or hung) before deleting or cleaning it up:
+		// every attempt below observes the same dead identity, races for the
+		// same marker, and loses to this pre-existing marker every time --
+		// reclaim is stuck, but the *original* holder is definitely not alive,
+		// so the error must say so accurately.
+		await writeFile(markerPath, "424242\n2020-01-01T00:00:00.000Z", "utf8");
 
 		let caught: unknown;
 		try {
@@ -214,6 +260,42 @@ describe("withFileLock (C3): serializes concurrent critical sections", () => {
 		expect(message).not.toContain("held by a live process");
 		expect(message).toContain(markerPath);
 		expect(message).toContain(lockPath);
+		// Two-phase manual-recovery guidance (F1): must instruct checking the
+		// marker's own recorded pid for liveness *before* ever suggesting
+		// deletion, not just point at a path and imply it is always safe to
+		// remove.
+		expect(message).toContain("kill -0");
+		expect(message).toContain("still alive");
+		expect(message).toContain("confirmed dead");
+	});
+
+	it("fails closed instead of silently splitting the arbitration domain when lockPath's own final path component is a symlink", async () => {
+		const { symlink, writeFile } = await import("node:fs/promises");
+		const base = await makeTmpDir("gatekeeper-filelock-symlink-");
+		const target = path.join(base, "real-target.lock");
+		const lockPath = path.join(base, "alias.lock");
+		// The target's own content is irrelevant -- the check must fire before
+		// this module ever needs to resolve or interpret it.
+		await writeFile(target, "999999", "utf8");
+		await symlink(target, lockPath);
+
+		let caught: unknown;
+		try {
+			await withFileLock(lockPath, async () => undefined);
+		} catch (error) {
+			caught = error;
+		}
+
+		expect(caught).toBeInstanceOf(FileLockError);
+		const message = caught instanceof Error ? caught.message : "";
+		expect(message).toContain("must not be a symlink");
+		expect(message).toContain(lockPath);
+		// Fails closed, not open: the symlink itself is left untouched (no
+		// silent deletion, no silent fallback to operating on the canonical
+		// target under a different arbitration domain).
+		const { lstat } = await import("node:fs/promises");
+		const linkStat = await lstat(lockPath);
+		expect(linkStat.isSymbolicLink()).toBe(true);
 	});
 
 	it("resolves a simultaneous double-stale-reader ABA race: exactly one waiter wins the reclaim marker and the two critical sections never interleave", async () => {

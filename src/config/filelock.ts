@@ -1,23 +1,24 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, open, rm } from "node:fs/promises";
+import { lstat, mkdir, open, rm } from "node:fs/promises";
 import path from "node:path";
 
 /**
- * Same-directory advisory lock file (`O_CREAT | O_EXCL`, content = holder
- * PID), used to serialize the read-modify-write sequences in
- * src/config/controls.ts's `upsertControl` and src/config/repos.ts's
- * `upsertRepo` -- both are load-then-save round trips with no lock of their
- * own otherwise, so two concurrent `gatekeeper adopt`/`gatekeeper
- * init-control` invocations (e.g. a batch script adopting several repos at
- * once) could interleave their reads and saves and silently lose one
- * writer's update. `O_EXCL` create is atomic on every filesystem Node
- * targets, so "did I win the race to create the lock file" is never itself
- * racy.
+ * Same-directory advisory lock file (`O_CREAT | O_EXCL`, content =
+ * `"<pid>\n<nonce>"`, see `LockIdentity`), used to serialize the
+ * read-modify-write sequences in src/config/controls.ts's `upsertControl`
+ * and src/config/repos.ts's `upsertRepo` -- both are load-then-save round
+ * trips with no lock of their own otherwise, so two concurrent `gatekeeper
+ * adopt`/`gatekeeper init-control` invocations (e.g. a batch script adopting
+ * several repos at once) could interleave their reads and saves and
+ * silently lose one writer's update. `O_EXCL` create is atomic on every
+ * filesystem Node targets, so "did I win the race to create the lock file"
+ * is never itself racy.
  *
  * This is advisory, single-machine, single-filesystem locking -- it does not
  * (and does not need to) handle NFS or cross-machine coordination; the files
  * it protects (`repos.yaml`, `controls.yaml`) are themselves single-machine,
- * single-user state (see their own header comments).
+ * single-user state (see their own header comments). `lockPath` must also
+ * not itself be a symlink (see `readLockIdentity`'s doc comment for why).
  */
 
 export class FileLockError extends Error {
@@ -44,6 +45,18 @@ export interface FileLockTestHooks {
 	 * the marker protocol exists to arbitrate. Never set in production.
 	 */
 	beforeReclaim?: (holderPid: number) => void | Promise<void>;
+	/**
+	 * Test-only concurrency seam: invoked after a reclaim winner has written
+	 * its own `(pid, started_at)` into the reclaim marker and re-verified
+	 * that `lockPath` still identifies the exact stale generation it
+	 * captured, immediately before the destructive `rm(lockPath)` that
+	 * follows. This is the narrow "paused after final verification, before
+	 * delete" window a human operator can genuinely observe in production (a
+	 * GC pause, scheduler preemption, or slow disk I/O -- not just a crash);
+	 * lets tests deterministically construct it and inspect the
+	 * still-present marker's content. Never set in production.
+	 */
+	beforeReclaimDelete?: (markerPath: string) => void | Promise<void>;
 	/** Test-only: override the retry cadence between acquisition attempts (production default: `LOCK_RETRY_DELAY_MS`). Lets tests exhaust the retry budget without waiting out the real-world ~5s worst case. Never set in production. */
 	retryDelayMs?: number;
 	/** Test-only: override the maximum number of acquisition attempts before giving up (production default: `LOCK_MAX_ATTEMPTS`). Never set in production. */
@@ -135,8 +148,53 @@ function identitiesMatch(observed: LockIdentity, current: LockIdentity): boolean
  * -- exactly the ambiguity this capture exists to rule out. A single open
  * `FileHandle` keeps referring to the same inode for its whole lifetime
  * regardless of what happens to the path afterward.
+ *
+ * ## Fails closed if `lockPath` itself is a symlink
+ *
+ * `open(lockPath, "r")` below follows symlinks. If `lockPath`'s own final
+ * path component were a symlink to some canonical target file, this capture
+ * would silently observe the *canonical* target's `(dev, ino)` -- but every
+ * *path-based* operation elsewhere in this module (`staleMarkerPath`'s
+ * marker naming, the `O_EXCL` create race in `acquireLock`, this waiter's
+ * own eventual `rm`) keys off the *alias* path string `lockPath`, not the
+ * inode. Two waiters reaching the same canonical target through two
+ * different alias paths (or one alias, one canonical) would each compute a
+ * *different* marker path for the identical inode, race independently, both
+ * "win" their own marker, and both legitimately pass the `(dev, ino, pid,
+ * nonce)` re-check in `reclaimStaleLock` -- because it really is the same
+ * inode -- yet each `rm`s and re-creates at its own distinct path string (an
+ * `rm` on a symlink path removes the symlink itself, not its target),
+ * producing two live, uncoordinated lock files for what was meant to be one
+ * arbitration domain: double entry, structurally identical in spirit to the
+ * rename-CAS and blind-`rm` bugs this module has already had to close, just
+ * introduced by the filesystem's own aliasing instead of a race in this
+ * module's own logic.
+ *
+ * `lstat` (rather than an `O_NOFOLLOW` open flag, which Node's `fs` API does
+ * not expose as a portable cross-platform constant) is used to check
+ * `lockPath`'s own type without following it, before ever opening it. This
+ * does leave a narrow `lstat`-then-`open` TOCTOU window in principle (the
+ * path could be swapped for a symlink in between) -- but that residual
+ * window is caught downstream anyway: `reclaimStaleLock`'s final `(dev, ino,
+ * nonce)` re-check calls this same function again, so even a symlink
+ * installed in that exact gap gets an independent chance to be rejected
+ * before anything destructive happens, narrowing the true residual risk to
+ * "an adversarial/concurrent symlink swap lands in a multi-nanosecond gap",
+ * not "any symlinked lock path silently works incorrectly".
  */
 async function readLockIdentity(lockPath: string): Promise<LockIdentity | undefined> {
+	let linkStat: Awaited<ReturnType<typeof lstat>>;
+	try {
+		linkStat = await lstat(lockPath);
+	} catch {
+		// Lock path doesn't exist (yet, or anymore) -- nothing to check and
+		// nothing to read; same "no information" handling as the open-failure
+		// case below.
+		return undefined;
+	}
+	if (linkStat.isSymbolicLink()) {
+		throw new FileLockError(`lock path must not be a symlink: ${lockPath}`);
+	}
 	let handle: Awaited<ReturnType<typeof open>>;
 	try {
 		handle = await open(lockPath, "r");
@@ -301,25 +359,44 @@ function staleMarkerPath(lockPath: string, identity: LockIdentity): string {
  * ## Why the marker itself is never taken over, only ever timed out
  *
  * A marker that some waiter won but never releases (that waiter itself
- * crashed between winning it and either deleting it or cleaning it up)
- * permanently blocks reclaim of *that one specific dead-pid identity*: every
- * future waiter that observes the same identity will lose the `O_EXCL` race
- * against it forever, loop, and eventually exhaust `acquireLock`'s retry
- * budget (see the distinct "reclaim is stuck" `FileLockError` this produces,
- * as opposed to the ordinary "held by a live process" one). This is a
- * deliberate tradeoff, not an oversight: a "steal an abandoned marker after
- * some timeout" recovery path would have to itself decide, without any
- * additional coordination primitive, whether the marker's current holder is
- * truly gone -- which is exactly the blind-delete race this whole module
- * exists to prevent, just recursively reintroduced one layer down at the
- * marker itself. Compounding failures (the original lock holder *and* its
- * reclaimer both crashing, in the narrow window between the reclaimer
- * winning the marker and finishing with it) are rare enough, and the
- * consequence contained enough (one specific already-dead identity's
- * recovery stalls; every other lock file and every other identity on the
- * same lock file are unaffected), that failing loudly and pointing a human
- * at the exact marker path to delete (see `acquireLock`'s timeout message)
- * is the safer choice over adding more automated machinery here.
+ * crashed, or is merely paused -- a GC pause, scheduler preemption, or slow
+ * disk I/O can all produce the exact same observable state as a crash from
+ * every other waiter's point of view -- between winning it and either
+ * deleting it or cleaning it up) permanently blocks reclaim of *that one
+ * specific dead-pid identity*: every future waiter that observes the same
+ * identity will lose the `O_EXCL` race against it forever, loop, and
+ * eventually exhaust `acquireLock`'s retry budget (see the distinct
+ * "reclaim is stuck" `FileLockError` this produces, as opposed to the
+ * ordinary "held by a live process" one). This is a deliberate tradeoff, not
+ * an oversight: a "steal an abandoned marker after some timeout" recovery
+ * path would have to itself decide, without any additional coordination
+ * primitive, whether the marker's current holder is truly gone -- which is
+ * exactly the blind-delete race this whole module exists to prevent, just
+ * recursively reintroduced one layer down at the marker itself. Compounding
+ * failures (the original lock holder *and* its reclaimer both crashing, or
+ * the reclaimer merely stalling, in the narrow window between winning the
+ * marker and finishing with it) are rare enough, and the consequence
+ * contained enough (one specific already-dead identity's recovery stalls;
+ * every other lock file and every other identity on the same lock file are
+ * unaffected), that failing loudly and pointing a human at the exact marker
+ * path is the safer choice over adding more automated machinery here.
+ *
+ * To make that human recovery *safe* rather than a guess, this function
+ * writes its own `"<pid>\n<started_at>"` into the marker immediately after
+ * winning it (below) -- exactly mirroring a lock file's own content format.
+ * A human who reaches `acquireLock`'s "reclaim is stuck" timeout message
+ * (which walks through this) can read that pid out of the marker and check
+ * with the local equivalent of `kill -0 <pid>` whether *that* process (the
+ * reclaimer, not the original dead-pid holder recorded in `lockPath` --
+ * they are two different processes) is still alive. If it is, reclaim is
+ * still legitimately in progress (however slow) and the marker/`lockPath`
+ * must **not** be deleted: doing so while the paused reclaimer still holds
+ * that marker recreates exactly the double-entry this module exists to
+ * prevent -- the paused reclaimer resumes, finds its earlier `identitiesMatch`
+ * check already passed, and runs the `rm(lockPath)` it had already decided
+ * on, deleting whatever a well-meaning operator (or a subsequent waiter)
+ * created in the meantime. Only once the marker's own recorded pid is
+ * confirmed dead is deleting the marker and `lockPath` safe.
  *
  * No path in this protocol ever deletes or moves an inode that is still
  * reachable and alive: every destructive step is gated on an inode-identity
@@ -353,8 +430,13 @@ async function reclaimStaleLock(lockPath: string, identity: LockIdentity, hooks?
 			{ cause: error },
 		);
 	}
-	await handle.close();
 	try {
+		// Record who is attempting this reclaim (pid + when), so that if this
+		// waiter itself stalls or crashes before finishing, a human recovering
+		// manually (see acquireLock's "reclaim is stuck" timeout message and
+		// this function's doc comment) can tell an orphaned marker from one
+		// whose owner is merely slow, instead of guessing.
+		await handle.writeFile(`${process.pid}\n${new Date().toISOString()}`, "utf8");
 		// Load-bearing re-check -- see this function's doc comment for the
 		// exact interleaving it defeats, and for why (dev, ino, pid) alone is
 		// not enough (the nonce). Only delete `lockPath` if it still
@@ -364,9 +446,11 @@ async function reclaimStaleLock(lockPath: string, identity: LockIdentity, hooks?
 		// never ourselves observed as stale.
 		const current = await readLockIdentity(lockPath);
 		if (current !== undefined && identitiesMatch(identity, current)) {
+			await hooks?.beforeReclaimDelete?.(markerPath);
 			await rm(lockPath, { force: true });
 		}
 	} finally {
+		await handle.close().catch(() => undefined);
 		// Best-effort: free the marker path for reuse. If this fails (e.g. a
 		// crash right here), the only cost is one permanent orphan file for
 		// this one already-resolved identity -- it can never cause a future
@@ -428,7 +512,7 @@ async function acquireLock(lockPath: string, hooks?: FileLockTestHooks): Promise
 	}
 	if (lastDeadMarkerPath !== undefined) {
 		throw new FileLockError(
-			`timed out after ${maxAttempts} attempts trying to reclaim a stale lock ${lockPath}: its recorded holder is dead, but reclaim is stuck behind another waiter's reclaim marker that was never cleaned up (crashed mid-reclaim?). This is not a live-holder wait. Manual recovery: after confirming no process is actually using ${lockPath}, delete ${lastDeadMarkerPath} and then ${lockPath}.`,
+			`timed out after ${maxAttempts} attempts trying to reclaim a stale lock ${lockPath}: its recorded holder is dead, but reclaim of it is stuck behind another waiter's reclaim marker (${lastDeadMarkerPath}) that has not been resolved. This is NOT a live-holder wait, and you must not immediately delete anything: that marker's content is "<pid>\\n<started_at>" for whichever process is (or was) attempting the reclaim -- read that pid and check it with the local equivalent of \`kill -0 <pid>\` (exit 0, or a permission error, means still alive; "no such process" means dead). If it is still alive, reclaim is genuinely still in progress (possibly just slow) and nothing here needs manual intervention yet. Only once that pid is confirmed dead is it safe to manually delete ${lastDeadMarkerPath} and then ${lockPath}.`,
 		);
 	}
 	throw new FileLockError(
@@ -446,6 +530,15 @@ async function releaseLock(lockPath: string): Promise<void> {
  * Callers pick `lockPath` themselves (conventionally `<target-file>.lock`,
  * alongside the file the lock protects) so the lock and the data it guards
  * live in the same directory and share the same lifecycle expectations.
+ *
+ * Acquisition waits out other holders/reclaimers for up to ~5s worst case
+ * (`LOCK_MAX_ATTEMPTS` x `LOCK_RETRY_DELAY_MS`) before rejecting with a
+ * `FileLockError` -- this module is meant for the *short*, in-process
+ * critical sections `fn` itself represents (a load-then-save round trip),
+ * not for coordinating a long-held lock across a whole external process's
+ * lifetime. For that latter use case, see `src/dispatch/lock.ts`'s
+ * `acquireSupervisorLock`, which is held for an entire order's supervision
+ * and has its own, deliberately different, takeover/audit semantics.
  */
 export async function withFileLock<T>(lockPath: string, fn: () => Promise<T>, hooks?: FileLockTestHooks): Promise<T> {
 	await acquireLock(lockPath, hooks);
