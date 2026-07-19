@@ -29,6 +29,7 @@ import {
 	type TriageIssueInput,
 	type TriageVerdict,
 } from "../render/triage.js";
+import { resolveRoleCardPath } from "../roles/cards.js";
 import type { TierModelSelection } from "../roles/policy.js";
 import {
 	loadRolesPolicy,
@@ -295,6 +296,26 @@ async function resolveTierSelections(
 }
 
 /**
+ * Resolve the deep-reasoner role card path the briefing should point its
+ * reader at: the control repo's own `governance/roles/deep-reasoner.md` when
+ * `options.registry` has one (see src/roles/cards.ts's resolveRoleCardPath),
+ * otherwise the packaged default. The packaged copy always ships with the
+ * package, so a RoleCardNotFoundError here is an installation anomaly, not a
+ * routine "not customized" state -- degrade to a warning and the literal
+ * fallback string rather than failing the whole briefing over it.
+ */
+function resolveDeepReasonerCardPath(registryPath: string): string {
+	try {
+		return resolveRoleCardPath("deep-reasoner", registryPath);
+	} catch (error) {
+		process.stderr.write(
+			`warning: 无法定位 deep-reasoner 角色卡: ${error instanceof Error ? error.message : String(error)}\n`,
+		);
+		return "docs/roles/deep-reasoner.md";
+	}
+}
+
+/**
  * Assembles the triage briefing markdown (contract summary + heuristic
  * consumer-impact graph + roles-policy dispatch candidates). Shared by the
  * plain-printing path (runTriageBrief) and --run, which instead writes it to
@@ -326,6 +347,7 @@ async function buildTriageBriefing(
 	if (rolesPolicyWarning) {
 		process.stderr.write(`warning: 无法加载 roles-policy: ${rolesPolicyWarning}\n`);
 	}
+	const deepReasonerCardPath = resolveDeepReasonerCardPath(options.registry);
 
 	return renderTriageBriefing({
 		key,
@@ -336,6 +358,7 @@ async function buildTriageBriefing(
 		impact,
 		tiers,
 		...(registry.warnings.length > 0 ? { registryWarnings: registry.warnings.map(formatRegistryIssue) } : {}),
+		deepReasonerCardPath,
 	});
 }
 

@@ -13,6 +13,7 @@
     "lanes.d",
     "schema",
     "examples",
+    "docs/roles",
     "action.yml",
     "roles-policy.yaml"
   ],

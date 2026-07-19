@@ -4,9 +4,15 @@ import path from "node:path";
 import type { Command } from "commander";
 
 import { AgentRunError, runAgentCommand } from "../agent/runner.js";
-import { ConfigDiscoveryError, discoverConfig, missingAgentMessage } from "../config/discover.js";
+import {
+	ConfigDiscoveryError,
+	discoverConfig,
+	missingAgentMessage,
+	resolveRegistryOption,
+} from "../config/discover.js";
 import { renderInitBrief } from "../init/brief.js";
 import { RepoAccessError, scanRepos } from "../init/scan.js";
+import { resolveRoleCardPath } from "../roles/cards.js";
 import { runValidate } from "./validate.js";
 
 export interface InitOptions {
@@ -14,6 +20,29 @@ export interface InitOptions {
 	out: string;
 	/** Run .gatekeeper.yml's configured agent against the brief to draft a registry, then validate --strict it. */
 	run?: boolean;
+}
+
+/**
+ * Resolve the registry-drafter role card path to point the printed next-step
+ * hint at: `init` consumes no `.gatekeeper.yml` field of its own, but a
+ * `discovered` config's `registry:` (if any -- `init` has no `--registry`
+ * flag, so only env/config can supply one here) is enough to prefer a
+ * control repo's own customized `governance/roles/registry-drafter.md` over
+ * the packaged default (see src/roles/cards.ts's resolveRoleCardPath). The
+ * packaged copy always ships with the package, so a lookup failure here is
+ * an installation anomaly, not a routine "not customized" state -- degrade
+ * to the literal fallback path rather than failing the whole command over a
+ * printed hint.
+ */
+function resolveRegistryDrafterCardPath(discovered: Awaited<ReturnType<typeof discoverConfig>>): string {
+	try {
+		return resolveRoleCardPath("registry-drafter", resolveRegistryOption({ discovered }));
+	} catch (error) {
+		process.stderr.write(
+			`warning: could not locate the registry-drafter role card: ${error instanceof Error ? error.message : String(error)}\n`,
+		);
+		return "docs/roles/registry-drafter.md";
+	}
 }
 
 /**
@@ -114,9 +143,10 @@ export async function runInit(options: InitOptions, cwd: string): Promise<number
 	process.stdout.write(`  ${briefPath}\n\n`);
 
 	if (!options.run) {
+		const registryDrafterCardPath = resolveRegistryDrafterCardPath(discovered);
 		process.stdout.write(
 			"Next step: hand init-brief.md to any coding agent (Claude Code / Codex / Cursor / pi / ...) running the " +
-				"registry-drafter role per docs/roles/registry-drafter.md (in pi you can also run /gatekeeper-init) to draft " +
+				`registry-drafter role per ${registryDrafterCardPath} (in pi you can also run /gatekeeper-init) to draft ` +
 				"contracts/policy YAML from the candidates above, then run `gatekeeper validate --registry <dir>` to close the loop.\n",
 		);
 		return 0;

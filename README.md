@@ -29,9 +29,26 @@ npm link
 gatekeeper --help
 ```
 
-Create a registry with one `policy.yaml` and one YAML file per contract under `contracts/`, following [the specification](docs/SPEC.md). The rest of this section is the three-stage adopt path: **adopt** each repo once, **provision** local scaffolding for all of them from a hub checkout, then use every other command with zero repeated flags from inside an adopted repo.
+Create a registry with one `policy.yaml` and one YAML file per contract under `contracts/`, following [the specification](docs/SPEC.md) — or let `gatekeeper init-control` scaffold one for you (see below). The rest of this section is the four-stage adopt path: **init-control** the hub repo once, **adopt** each governed repo once, **provision** local scaffolding for all of them from the hub, then use every other command with zero repeated flags from inside an adopted repo.
 
-### 1. Adopt each repo, once
+### 1. Initialize a control repo, once
+
+`gatekeeper init-control <path>` scaffolds a brand-new control/hub checkout — the directory `gatekeeper adopt --control` locates a registry inside — in one command: `governance/registry/policy.yaml` (a minimal, working two-level policy), `governance/registry/contracts/` (empty, plus an annotated `_example.yaml.txt` template), `governance/registry/repos.yaml` (empty roster), `governance/roles/*.md` (your organization's own customizable copy of the four role cards), and a root `roles-policy.yaml` copy. It then runs `gatekeeper validate` against the generated registry and prints the result.
+
+```bash
+gatekeeper init-control /work/governance-hub
+```
+
+Every artifact is written idempotently: an existing file is left untouched and reported as skipped unless you pass `--force`, so a rerun is always safe. `repos.yaml` is the one exception, in the opposite direction: it is **never** overwritten by `--force`, even when it already exists — it is live state exclusively owned by `gatekeeper adopt` (the registered-repo roster), not a template, so a rerun never risks discarding already-adopted repos. Skip this step and hand-author the registry yourself if you prefer — `init-control` is a convenience, not a requirement for `adopt`/`provision` to work.
+
+#### Control repo customization points
+
+- `governance/registry/policy.yaml`: add/rename `levels`, tune `enforcement` (`block` | `warn`) and `require` (an m-of-n lane count) per level, or add a top-level `lanes:` block to override/extend the packaged `lanes.d/*.yaml` presets.
+- `governance/roles/*.md`: this control repo's own copy of the four role cards (`deep-reasoner`, `registry-drafter`, `contract-scout`, `registry-reviewer`). `gatekeeper triage`/`gatekeeper init` briefings prefer this copy over the packaged `docs/roles/` default whenever the repo they're run against is adopted into this registry (see [Role cards](#role-cards-vendor-neutral) below) — edit these to tailor a role's instructions to your organization without forking the package.
+- `roles-policy.yaml` (control repo root): this control repo's own model-tier preferences (`tiers.<role>.prefer`/`count`/`cross_vendor`). Running `gatekeeper doctor`/`gatekeeper triage` from the control repo root reads this copy before falling back to the packaged default (see [Role cards](#role-cards-vendor-neutral) below).
+- `governance/registry/repos.yaml`: **not** a customization point — it is `gatekeeper adopt`'s own roster and `--force` never touches it once it exists (see above).
+
+### 2. Adopt each repo, once
 
 `gatekeeper adopt` locates the registry inside a **control** (hub) checkout — the directory that has your registry checked out, typically at `governance/registry` or `registry` — and registers one **target** repo against it: it writes a minimal `.gatekeeper.yml` at the target repo's root and upserts that repo's entry into `<registry>/repos.yaml`.
 
@@ -81,7 +98,7 @@ repos:
     adopted_at: 2026-07-19T00:00:00.000Z
 ```
 
-### 2. Provision scaffolding from the hub
+### 3. Provision scaffolding from the hub
 
 From anywhere the registry can be discovered (typically the control repo itself, passing `--registry` explicitly since a control repo never adopts itself), fan CI job / pre-push hook / AGENTS.md scaffolding out across every registered repo:
 
@@ -95,7 +112,7 @@ With no `--ci`/`--hooks`/`--agents-md` flag, `provision` does all three for ever
 gatekeeper provision your-org/your-repo --ci --dry-run
 ```
 
-### 3. Zero-flag daily use
+### 4. Zero-flag daily use
 
 Inside an adopted repo, most commands need no flags at all:
 
@@ -124,6 +141,7 @@ gatekeeper check \
 
 | Command | Purpose |
 | --- | --- |
+| `gatekeeper init-control <path> [--force]` | Scaffold a brand-new control/hub repo: `governance/registry` (policy.yaml, contracts/, repos.yaml), `governance/roles` (customizable role-card copies), and a root `roles-policy.yaml` copy, then validate the result. Idempotent per artifact; `--force` overwrites, except `repos.yaml` (`gatekeeper adopt`'s live roster), which `--force` never touches once it exists. |
 | `gatekeeper adopt --control <hub> [path]` | Register a repo (defaulting to the current directory) with the registry located inside `--control`: write `.gatekeeper.yml` at its root and upsert its entry into `<registry>/repos.yaml`. Refuses to run outside a Git working tree or when the target/control repos overlap. |
 | `gatekeeper provision [repos...] [--ci] [--hooks] [--agents-md] [--dry-run] [--force]` | Fan CI job injection, a fail-open pre-push hook, and an AGENTS.md instruction block out across every repo in `repos.yaml` (or just the named ones). No flag means all three. |
 | `gatekeeper validate [--registry <dir>] [--strict]` | Validate YAML/schema, level and lane references, regexes, preset collisions, overly broad bare `**` globs, and unusable frozen-mirror allowlists. `--strict` turns warnings into exit 1. |
@@ -290,6 +308,8 @@ Gatekeeper's product core makes zero model calls (see "Govern structure, not cap
 - `deep-reasoner`: make the issue requirement-gate judgment and dispatch plan.
 
 Each file is plain markdown you can hand to Claude Code, Codex, Cursor, pi, or any other coding agent as a subagent/system-prompt definition. `gatekeeper init` and `gatekeeper triage` print next-step guidance pointing at these files instead of assuming a specific agent runtime.
+
+`gatekeeper init-control` writes an adopted control repo its own customizable copy of all four cards at `governance/roles/*.md` (see [Control repo customization points](#control-repo-customization-points) above). When a repo is adopted into a registry that has one, `init`/`triage` briefings point at that copy instead of the packaged `docs/roles/` default (src/roles/cards.ts's `resolveRoleCardPath`); otherwise they fall back to the packaged copy unchanged.
 
 The repo-root `roles-policy.yaml` defines data-only model tiers consumed by these roles:
 

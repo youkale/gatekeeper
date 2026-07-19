@@ -10,6 +10,7 @@ import { runCheck } from "./commands/check.js";
 import { rolesPolicyCapabilityCheck, runDoctor } from "./commands/doctor.js";
 import { runGate } from "./commands/gate.js";
 import { registerInitCommand } from "./commands/init.js";
+import { runInitControl } from "./commands/init-control.js";
 import { runProvision } from "./commands/provision.js";
 import { runStats } from "./commands/stats.js";
 import { runTriage } from "./commands/triage.js";
@@ -203,6 +204,22 @@ program
 	});
 
 registerInitCommand(program);
+
+program
+	.command("init-control")
+	.description(
+		"Scaffold a brand-new control/hub repo: governance/registry (policy.yaml, contracts/, an empty repos.yaml), " +
+			"governance/roles (customizable role-card copies), and a root roles-policy.yaml copy, then validate the result.",
+	)
+	.argument("<path>", "control repo root to create/populate")
+	.option(
+		"--force",
+		"overwrite every existing template artifact, except repos.yaml (gatekeeper adopt's own roster, never touched once it exists)",
+		false,
+	)
+	.action(async (targetPath, options) => {
+		process.exitCode = await runInitControl({ ...options, path: targetPath }, process.cwd());
+	});
 
 program
 	.command("adopt")

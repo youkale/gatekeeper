@@ -28,6 +28,8 @@
 
 | T-20260719-04 | 易用性 | 交互简化 B：BYO agent runner（agent.command 配置 + 双模式 runner + triage/init --run） | sonnet-coder | R1: claude FAIL(shell 引用，双场景活体) + grok FAIL(exit code 一致性、进程组终止)；R2: 双 PASS（三修复全 mutation 对照） | ✅ 验收提交 | records/T-20260719-04-byo-runner.md |
 
+| T-20260719-05 | 易用性 | init-control：总控一键初始化（骨架+角色卡物化+roles-policy 副本，控制仓副本优先回落包内） | sonnet-coder | R1: claude FAIL(--force 清空 repos.yaml 数据丢失，活体) + grok PASS(6nb 采 4，含 basename 误判边界)；R2: claude PASS（逐字节存活+decoy 反证） | ✅ 验收提交 | records/T-20260719-05-init-control.md |
+
 ### 遗留债队列（活动，v1.1 候选）
 
 - [v1.1] enforce: hard 的真实前置：受信外部通道（GitHub App/webhook → repository_dispatch 触发默认分支 workflow）——workflow_run 桥接已实现但可被 PR 压制脉冲，仅 best-effort（T-11 裁决结论）
