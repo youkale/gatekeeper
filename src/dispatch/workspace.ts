@@ -5,10 +5,12 @@ export const DISPATCH_BRANCH_PREFIX = "gatekeeper/dispatch/";
 export type DispatchWorkspaceErrorCode =
 	| "DIRTY_WORKTREE"
 	| "UNSAFE_BASE_REF"
+	| "UNSAFE_BRANCH_REF"
 	| "BASE_NOT_FOUND"
 	| "BRANCH_CREATE_FAILED"
 	| "BRANCH_NOT_FOUND"
 	| "BRANCH_BASE_MISMATCH"
+	| "BRANCH_HEAD_MISMATCH"
 	| "WRONG_BRANCH"
 	| "GIT_FAILED";
 
@@ -33,8 +35,14 @@ export class DispatchWorkspaceError extends Error {
 export interface PrepareWorkspaceInput {
 	readonly orderId: string;
 	readonly baseRef: string;
+	/** Resume an already-delivered dispatch branch instead of creating this order's branch. */
+	readonly reuseBranch?: ReuseDispatchBranch;
 	/** Called after resolving the immutable base commit and before any branch mutation. */
 	readonly onBaseResolved?: (baseOid: string) => void | Promise<void>;
+}
+
+export interface ReuseDispatchBranch {
+	readonly branch: string;
 }
 
 export interface PreparedWorkspace {
@@ -131,6 +139,27 @@ export function assertSafeDispatchBaseRef(baseRef: string): void {
 	}
 }
 
+/** Review fix dispatches may only resume a dedicated, already-local dispatch branch. */
+export function assertSafeDispatchBranchRef(branch: string): void {
+	const unsafeSyntax =
+		!branch.startsWith(DISPATCH_BRANCH_PREFIX) ||
+		branch.length === DISPATCH_BRANCH_PREFIX.length ||
+		branch.startsWith("-") ||
+		!/^[a-zA-Z0-9._/-]+$/.test(branch) ||
+		branch.includes("..") ||
+		branch.includes("@{") ||
+		branch.includes("//") ||
+		branch.endsWith("/") ||
+		branch.endsWith(".") ||
+		branch.endsWith(".lock");
+	if (unsafeSyntax) {
+		throw new DispatchWorkspaceError(
+			"UNSAFE_BRANCH_REF",
+			`dispatch reuse branch is not a safe local ${DISPATCH_BRANCH_PREFIX} ref: ${branch}`,
+		);
+	}
+}
+
 export async function verifyCleanWorkspace(git: GitExecutor): Promise<void> {
 	const args = ["status", "--porcelain=v1", "--untracked-files=all"] as const;
 	const result = await execute(git, args);
@@ -155,9 +184,15 @@ export async function prepareDispatchWorkspace(
 ): Promise<PreparedWorkspace> {
 	assertSafeDispatchBaseRef(input.baseRef);
 	await verifyCleanWorkspace(git);
+	if (input.reuseBranch) {
+		assertSafeDispatchBranchRef(input.reuseBranch.branch);
+	}
 
 	const baseOid = await resolveDispatchBaseOid(input.baseRef, git);
 	await input.onBaseResolved?.(baseOid);
+	if (input.reuseBranch) {
+		return prepareReusedDispatchWorkspace(input, input.reuseBranch, baseOid, git);
+	}
 
 	const branch = `${DISPATCH_BRANCH_PREFIX}${input.orderId}`;
 	const branchRef = `refs/heads/${branch}`;
@@ -196,6 +231,90 @@ export async function prepareDispatchWorkspace(
 	return { branch, baseRef: input.baseRef, baseOid };
 }
 
+async function prepareReusedDispatchWorkspace(
+	input: PrepareWorkspaceInput,
+	reuseBranch: ReuseDispatchBranch,
+	baseOid: string,
+	git: GitExecutor,
+): Promise<PreparedWorkspace> {
+	const branch = reuseBranch.branch;
+	const branchRef = `refs/heads/${branch}`;
+	const existsArgs = ["show-ref", "--verify", "--quiet", branchRef] as const;
+	const exists = await execute(git, existsArgs);
+	if (exists.exitCode === 1) {
+		throw new DispatchWorkspaceError("BRANCH_NOT_FOUND", `dispatch reuse branch ${branch} does not exist`, {
+			command: existsArgs,
+			stderr: exists.stderr,
+		});
+	}
+	if (exists.exitCode !== 0) {
+		throw new DispatchWorkspaceError("GIT_FAILED", `${commandText(existsArgs)} exited ${exists.exitCode}`, {
+			command: existsArgs,
+			stderr: exists.stderr,
+		});
+	}
+
+	const branchTipArgs = ["rev-parse", "--verify", "--quiet", `${branchRef}^{commit}`] as const;
+	const branchTip = await execute(git, branchTipArgs);
+	requireSuccess(branchTip, branchTipArgs, "BRANCH_NOT_FOUND");
+	const branchTipOid = branchTip.stdout.trim();
+	if (branchTipOid.length === 0) {
+		throw new DispatchWorkspaceError("BRANCH_NOT_FOUND", `dispatch reuse branch ${branch} is not a commit`, {
+			command: branchTipArgs,
+		});
+	}
+
+	const currentHeadArgs = ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"] as const;
+	const currentHead = await execute(git, currentHeadArgs);
+	requireSuccess(currentHead, currentHeadArgs, "BRANCH_NOT_FOUND");
+	const currentHeadOid = currentHead.stdout.trim();
+	const headReachableArgs = ["merge-base", "--is-ancestor", currentHeadOid, branchTipOid] as const;
+	const headReachable = await execute(git, headReachableArgs);
+	if (headReachable.exitCode === 1) {
+		throw new DispatchWorkspaceError(
+			"BRANCH_HEAD_MISMATCH",
+			`current HEAD is not reachable from dispatch reuse branch ${branch}`,
+			{ command: headReachableArgs, stderr: headReachable.stderr },
+		);
+	}
+	if (headReachable.exitCode !== 0) {
+		throw new DispatchWorkspaceError(
+			"GIT_FAILED",
+			`${commandText(headReachableArgs)} exited ${headReachable.exitCode}`,
+			{
+				command: headReachableArgs,
+				stderr: headReachable.stderr,
+			},
+		);
+	}
+
+	const baseReachableArgs = ["merge-base", "--is-ancestor", baseOid, branchTipOid] as const;
+	const baseReachable = await execute(git, baseReachableArgs);
+	if (baseReachable.exitCode === 1) {
+		throw new DispatchWorkspaceError(
+			"BRANCH_BASE_MISMATCH",
+			`dispatch reuse branch ${branch} does not contain configured base ${input.baseRef}`,
+			{ command: baseReachableArgs, stderr: baseReachable.stderr },
+		);
+	}
+	if (baseReachable.exitCode !== 0) {
+		throw new DispatchWorkspaceError(
+			"GIT_FAILED",
+			`${commandText(baseReachableArgs)} exited ${baseReachable.exitCode}`,
+			{
+				command: baseReachableArgs,
+				stderr: baseReachable.stderr,
+			},
+		);
+	}
+
+	const switchArgs = ["switch", branch] as const;
+	const switched = await execute(git, switchArgs);
+	requireSuccess(switched, switchArgs, "BRANCH_CREATE_FAILED");
+	await verifyDispatchWorkspaceActive(input.orderId, git, reuseBranch);
+	return { branch, baseRef: input.baseRef, baseOid };
+}
+
 export async function resolveDispatchBaseOid(baseRef: string, git: GitExecutor): Promise<string> {
 	assertSafeDispatchBaseRef(baseRef);
 	const verifyArgs = ["rev-parse", "--verify", "--quiet", `${baseRef}^{commit}`] as const;
@@ -210,8 +329,15 @@ export async function resolveDispatchBaseOid(baseRef: string, git: GitExecutor):
 	return oid;
 }
 
-export async function verifyDispatchWorkspaceActive(orderId: string, git: GitExecutor): Promise<void> {
-	const expected = `${DISPATCH_BRANCH_PREFIX}${orderId}`;
+export async function verifyDispatchWorkspaceActive(
+	orderId: string,
+	git: GitExecutor,
+	reuseBranch?: ReuseDispatchBranch,
+): Promise<void> {
+	if (reuseBranch) {
+		assertSafeDispatchBranchRef(reuseBranch.branch);
+	}
+	const expected = reuseBranch?.branch ?? `${DISPATCH_BRANCH_PREFIX}${orderId}`;
 	const branchArgs = ["symbolic-ref", "--quiet", "--short", "HEAD"] as const;
 	let branch = await execute(git, branchArgs);
 	if (branch.exitCode === 0 && branch.stdout.trim() === expected) {

@@ -61,6 +61,142 @@ describe("dispatch workspace protocol", () => {
 		);
 	});
 
+	it("keeps the exact legacy command transcript and result when reuseBranch is omitted", async () => {
+		const git = scriptedGit([
+			result(),
+			result("base-oid\n"),
+			result("", 1),
+			result(),
+			result("gatekeeper/dispatch/wo-default\n"),
+		]);
+
+		await expect(prepareDispatchWorkspace({ orderId: "wo-default", baseRef: "main" }, git)).resolves.toEqual({
+			branch: "gatekeeper/dispatch/wo-default",
+			baseRef: "main",
+			baseOid: "base-oid",
+		});
+		expect(git.exec.mock.calls).toEqual([
+			[["status", "--porcelain=v1", "--untracked-files=all"]],
+			[["rev-parse", "--verify", "--quiet", "main^{commit}"]],
+			[["show-ref", "--verify", "--quiet", "refs/heads/gatekeeper/dispatch/wo-default"]],
+			[["switch", "--no-track", "--create", "gatekeeper/dispatch/wo-default", "base-oid"]],
+			[["symbolic-ref", "--quiet", "--short", "HEAD"]],
+		]);
+	});
+
+	it("resumes an existing dispatch branch and continues with a WIP snapshot on that branch", async () => {
+		const branch = "gatekeeper/dispatch/wo-original";
+		const git = scriptedGit([
+			result(),
+			result("base-oid\n"),
+			result(),
+			result("delivered-tip\n"),
+			result("base-oid\n"),
+			result(),
+			result(),
+			result(),
+			result(`${branch}\n`),
+			result(" M src/fix.ts\n"),
+			result(),
+			result("[branch next] wip\n"),
+		]);
+
+		await expect(
+			prepareDispatchWorkspace({ orderId: "wo-fix", baseRef: "base-oid", reuseBranch: { branch } }, git),
+		).resolves.toEqual({ branch, baseRef: "base-oid", baseOid: "base-oid" });
+		await expect(createWipSnapshot("r002", git)).resolves.toEqual({
+			hadChanges: true,
+			commitCreated: true,
+			gitEvidenceAvailable: true,
+			commitMessage: "wip: run r002 checkpoint (gatekeeper dispatch)",
+		});
+		expect(git.exec.mock.calls).toEqual([
+			[["status", "--porcelain=v1", "--untracked-files=all"]],
+			[["rev-parse", "--verify", "--quiet", "base-oid^{commit}"]],
+			[["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]],
+			[["rev-parse", "--verify", "--quiet", `refs/heads/${branch}^{commit}`]],
+			[["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]],
+			[["merge-base", "--is-ancestor", "base-oid", "delivered-tip"]],
+			[["merge-base", "--is-ancestor", "base-oid", "delivered-tip"]],
+			[["switch", branch]],
+			[["symbolic-ref", "--quiet", "--short", "HEAD"]],
+			[["status", "--porcelain=v1", "--untracked-files=all"]],
+			[["add", "--all", "--", "."]],
+			[["commit", "-m", "wip: run r002 checkpoint (gatekeeper dispatch)", "--", "."]],
+		]);
+	});
+
+	it("rejects a missing or unsafe reuse branch without creating a branch", async () => {
+		const missing = scriptedGit([result(), result("base-oid\n"), result("", 1)]);
+		await expect(
+			prepareDispatchWorkspace(
+				{
+					orderId: "wo-fix",
+					baseRef: "main",
+					reuseBranch: { branch: "gatekeeper/dispatch/wo-missing" },
+				},
+				missing,
+			),
+		).rejects.toMatchObject({ code: "BRANCH_NOT_FOUND" });
+		expect(missing.exec).not.toHaveBeenCalledWith(expect.arrayContaining(["--create"]));
+
+		const unsafe = scriptedGit([result()]);
+		await expect(
+			prepareDispatchWorkspace(
+				{ orderId: "wo-fix", baseRef: "main", reuseBranch: { branch: "refs/pull/17/head" } },
+				unsafe,
+			),
+		).rejects.toMatchObject({ code: "UNSAFE_BRANCH_REF" });
+		expect(unsafe.exec).toHaveBeenCalledTimes(1);
+
+		const unsafeBase = scriptedGit([]);
+		await expect(
+			prepareDispatchWorkspace(
+				{
+					orderId: "wo-fix",
+					baseRef: "refs/pull/17/head",
+					reuseBranch: { branch: "gatekeeper/dispatch/wo-original" },
+				},
+				unsafeBase,
+			),
+		).rejects.toMatchObject({ code: "UNSAFE_BASE_REF" });
+		expect(unsafeBase.exec).not.toHaveBeenCalled();
+	});
+
+	it("does not weaken dirty-worktree rejection in reuse mode", async () => {
+		const git = scriptedGit([result(" M src/work.ts\n")]);
+
+		await expect(
+			prepareDispatchWorkspace(
+				{
+					orderId: "wo-fix",
+					baseRef: "main",
+					reuseBranch: { branch: "gatekeeper/dispatch/wo-original" },
+				},
+				git,
+			),
+		).rejects.toMatchObject({ code: "DIRTY_WORKTREE" });
+		expect(git.exec).toHaveBeenCalledTimes(1);
+		expect(git.exec).toHaveBeenCalledWith(["status", "--porcelain=v1", "--untracked-files=all"]);
+	});
+
+	it("rejects reuse when the current HEAD is not reachable from the existing branch", async () => {
+		const branch = "gatekeeper/dispatch/wo-original";
+		const git = scriptedGit([
+			result(),
+			result("base-oid\n"),
+			result(),
+			result("branch-tip\n"),
+			result("unrelated-head\n"),
+			result("", 1),
+		]);
+
+		await expect(
+			prepareDispatchWorkspace({ orderId: "wo-fix", baseRef: "base-oid", reuseBranch: { branch } }, git),
+		).rejects.toMatchObject({ code: "BRANCH_HEAD_MISMATCH" });
+		expect(git.exec).not.toHaveBeenCalledWith(["switch", branch]);
+	});
+
 	it("rejects PR refs before invoking the injected executor", async () => {
 		for (const baseRef of [
 			"refs/pull/17/head",

@@ -22,6 +22,7 @@ import {
 } from "../src/dispatch/supervisor.js";
 import type { Run, WorkOrder } from "../src/dispatch/types.js";
 import { DispatchWorkspaceError, type WorkspaceFingerprint } from "../src/dispatch/workspace.js";
+import type { LoadedReviewCycle } from "../src/review/store.js";
 
 const temporaryDirectories: string[] = [];
 let dependencySet = 0;
@@ -273,6 +274,32 @@ function activeRunFor(setupResult: SetupResult): Run {
 		stdout_path: "runs/r001/stdout.log",
 		stderr_path: "runs/r001/stderr.log",
 		out_path: "runs/r001/out",
+	};
+}
+
+function reviewCycleFor(
+	targetDirectory: string,
+	state: LoadedReviewCycle["state"],
+	id = "rc-conflicting-cycle",
+): LoadedReviewCycle {
+	return {
+		cycle: {
+			apiVersion: "gatekeeper/v1",
+			id,
+			subject: { kind: "diff", repo: "acme/widgets", base_ref: "main" },
+			target_repo: { name: "acme/widgets", path: targetDirectory },
+			authoring_vendors: [],
+			max_rounds: 3,
+			lane_snapshot: [
+				{ id: "L1-claude", cli: "claude", vendor: "anthropic", command: "claude -p {brief}", required: true },
+			],
+			degraded: false,
+			created_at: "2026-07-21T00:00:00.000Z",
+		},
+		subject: "Review the diff.\n",
+		journal: [],
+		state,
+		rounds: [],
 	};
 }
 
@@ -980,6 +1007,24 @@ describe("dispatch supervision loop", () => {
 		expect((await loadOrder(setupResult.order.id, setupResult.env)).state).toBe("PENDING");
 	});
 
+	it("wires reuseBranch through prepare and every workspace activation", async () => {
+		const setupResult = await setup();
+		const deps = dependencies(setupResult, {
+			runner: scriptedRunner([{ kind: "deliver" }]),
+			evidence: [deliveredEvidence],
+		});
+		const reuseBranch = { branch: "gatekeeper/dispatch/wo-original" } as const;
+
+		const result = await superviseWorkOrder({ orderId: setupResult.order.id, baseRef: "main", reuseBranch }, deps);
+
+		expect(result.state).toBe("DELIVERED");
+		expect(deps.prepareWorkspace).toHaveBeenCalledWith(
+			expect.objectContaining({ orderId: setupResult.order.id, reuseBranch }),
+			deps.git,
+		);
+		expect(deps.activateWorkspace).toHaveBeenCalledWith(setupResult.order.id, deps.git, reuseBranch);
+	});
+
 	it("refuses same-realpath concurrent supervision and reports the conflicting order id", async () => {
 		const sharedTarget = await mkdtemp(path.join(tmpdir(), "gatekeeper-supervisor-shared-"));
 		temporaryDirectories.push(sharedTarget);
@@ -1017,6 +1062,77 @@ describe("dispatch supervision loop", () => {
 			conflict: { conflictingOrderId: second.order.id },
 		});
 		expect(runner).not.toHaveBeenCalled();
+	});
+
+	it("refuses an active same-realpath review supervisor and reports the conflicting cycle id", async () => {
+		const setupResult = await setup();
+		const runner = scriptedRunner([{ kind: "deliver" }]);
+		const cycle = reviewCycleFor(setupResult.targetDirectory, "REVIEWING");
+
+		await expect(
+			superviseWorkOrder(
+				{ orderId: setupResult.order.id, baseRef: "main" },
+				dependencies(setupResult, {
+					runner,
+					evidence: [deliveredEvidence],
+					listReviewCycles: vi.fn(async () => [cycle]),
+					readReviewSupervisorRecord: vi.fn(async () => ({
+						pid: 900,
+						started_at: "2026-07-21T00:00:00.000Z",
+					})),
+					isProcessAlive: (pid) => pid === 777 || pid === 900,
+				}),
+			),
+		).rejects.toMatchObject({
+			code: "TARGET_REPOSITORY_BUSY",
+			message: expect.stringContaining(cycle.cycle.id),
+			reviewConflict: { conflictingCycleId: cycle.cycle.id },
+		});
+		expect(runner).not.toHaveBeenCalled();
+	});
+
+	it("allows dispatch to proceed when a same-realpath review cycle is terminal", async () => {
+		const setupResult = await setup();
+		const readReviewSupervisorRecord = vi.fn(async () => ({
+			pid: 900,
+			started_at: "2026-07-21T00:00:00.000Z",
+		}));
+		const result = await superviseWorkOrder(
+			{ orderId: setupResult.order.id, baseRef: "main" },
+			dependencies(setupResult, {
+				runner: scriptedRunner([{ kind: "deliver" }]),
+				evidence: [deliveredEvidence],
+				listReviewCycles: vi.fn(async () => [reviewCycleFor(setupResult.targetDirectory, "ACCEPTED")]),
+				readReviewSupervisorRecord,
+			}),
+		);
+
+		expect(result.state).toBe("DELIVERED");
+		expect(readReviewSupervisorRecord).not.toHaveBeenCalled();
+	});
+
+	it("keeps the legacy successful result and journal when the review store is missing", async () => {
+		const setupResult = await setup();
+		const result = await superviseWorkOrder(
+			{ orderId: setupResult.order.id, baseRef: "main" },
+			dependencies(setupResult, {
+				runner: scriptedRunner([{ kind: "deliver" }]),
+				evidence: [deliveredEvidence],
+			}),
+		);
+
+		expect(result).toMatchObject({
+			orderId: setupResult.order.id,
+			state: "DELIVERED",
+			authoringVendors: [],
+			warnings: [],
+		});
+		expect(result.runs.map((run) => run.outcome)).toEqual(["COMPLETED"]);
+		expect((await loadOrder(setupResult.order.id, setupResult.env)).journal.map((event) => event.type)).toEqual([
+			"ORDER_CREATED",
+			"RUN_STARTED",
+			"ORDER_DELIVERED",
+		]);
 	});
 
 	it.each(["not-json\n", '{"pid":"bad","started_at":"not-an-instant"}\n'])(

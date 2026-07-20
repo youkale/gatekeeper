@@ -66,7 +66,9 @@
 
 | T-20260721-04 | 复杂编码（准标准面） | review B 包：VERDICT.json 契约 + 证据门（token/round/只读三验，设计 §5） | codex | codex 内审 2 轮 + 外审 claude(opus)/grok 双 PASS 零 blocker | ✅ 验收提交（948 测试） | tasks/records/T-20260721-04-verdict-contract.md |
 
-| T-20260721-05 | 复杂编码 | review F 包：dispatch workspace 续分支可选模式 + busy 扫描纳入 review cycles（触碰已交付面，设计拆解表F） | codex | DISPATCH | 进行中 | - |
+| T-20260721-05 | 复杂编码 | review F 包：dispatch workspace 续分支可选模式 + busy 扫描纳入 review cycles（触碰已交付面，设计拆解表F） | codex | codex-reviewer + claude-reviewer + grok-reviewer 三路 PASS（零 blocker） | ✅ 验收完成（未提交，按用户要求） | tasks/records/T-20260721-05-dispatch-review-extensions.md |
+
+| T-20260721-06 | 常规编码 | review D 包：blocker 聚合去重 + 修复/增量 brief 合成（纯函数，设计拆解表D） | sonnet-coder | DISPATCH | 进行中 | - |
 
 ### 遗留债队列（活动，v1.1 候选）
 

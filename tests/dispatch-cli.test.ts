@@ -214,6 +214,29 @@ describe("runDispatchStart", () => {
 		expect(JSON.parse(ledger.trim())).toMatchObject({ kind: "dispatch", key: "acme/widgets#42", outcome: "DELIVERED" });
 	});
 
+	it("passes the internal review-fix reuse branch through start supervision", async () => {
+		const { fn: supervise, calls } = fakeSupervise(baseResult({ orderId: "placeholder", state: "DELIVERED" }));
+		const reuseBranch = { branch: "gatekeeper/dispatch/wo-original" } as const;
+		captureStdout();
+
+		const exitCode = await runDispatchStart(
+			{
+				issue: 42,
+				registry: registryDir,
+				repo: "acme/widgets",
+				agentCommand: "custom-cli {brief} {out}",
+				yes: true,
+				reuseBranch,
+			},
+			targetDir,
+			{ env, now: FIXED_NOW, supervise: supervise as unknown as typeof supervise, createProvider: stubIssueProvider },
+		);
+
+		expect(exitCode).toBe(0);
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.reuseBranch).toEqual(reuseBranch);
+	});
+
 	it("returns 2 when --repo is not registered (and never calls supervise)", async () => {
 		const stderr = captureStderr();
 		const { fn: supervise, calls } = fakeSupervise(baseResult());

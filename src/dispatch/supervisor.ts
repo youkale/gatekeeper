@@ -5,6 +5,7 @@ import path from "node:path";
 import { parseDocument, stringify } from "yaml";
 import { type ResolvedAgentCommand, resolveAgentCommand } from "../agent/resolve.js";
 import { AgentRunError, type AgentRunOptions, type AgentRunResult, runAgentCommand } from "../agent/runner.js";
+import { type LoadedReviewCycle, listCycles, reviewCycleDirectory } from "../review/store.js";
 import { type ClassificationResult, classifyRunOutcome } from "./classify.js";
 import {
 	checkDeliveryEvidence,
@@ -34,6 +35,7 @@ import {
 import {
 	createWipSnapshot,
 	prepareDispatchWorkspace,
+	type ReuseDispatchBranch,
 	readWorkspaceFingerprint,
 	resolveDispatchBaseOid,
 	verifyDispatchWorkspaceActive,
@@ -47,6 +49,7 @@ export const DISPATCH_TOTAL_RUN_CAP = 4;
 export const DISPATCH_COOLDOWN_EXIT_THRESHOLD_SECONDS = 15 * 60;
 
 const TERMINAL_ORDER_STATES = new Set(["DELIVERED", "ABANDONED"]);
+const TERMINAL_REVIEW_CYCLE_STATES = new Set(["ACCEPTED", "ABANDONED"]);
 const TRANSIENT_OUTCOMES = new Set<RunOutcome>([
 	"TIMEOUT",
 	"STALLED",
@@ -72,6 +75,12 @@ export interface ReviewerConflictWarning {
 export interface SupervisorConflict {
 	readonly code: "TARGET_REPOSITORY_BUSY";
 	readonly conflictingOrderId: string;
+	readonly targetRealpath: string;
+}
+
+export interface ReviewSupervisorConflict {
+	readonly code: "TARGET_REPOSITORY_BUSY";
+	readonly conflictingCycleId: string;
 	readonly targetRealpath: string;
 }
 
@@ -102,16 +111,18 @@ export type DispatchSupervisorErrorCode =
 export class DispatchSupervisorError extends Error {
 	readonly code: DispatchSupervisorErrorCode;
 	readonly conflict?: SupervisorConflict;
+	readonly reviewConflict?: ReviewSupervisorConflict;
 
 	constructor(
 		code: DispatchSupervisorErrorCode,
 		message: string,
-		details: { conflict?: SupervisorConflict; cause?: unknown } = {},
+		details: { conflict?: SupervisorConflict; reviewConflict?: ReviewSupervisorConflict; cause?: unknown } = {},
 	) {
 		super(message, details.cause !== undefined ? { cause: details.cause } : undefined);
 		this.name = "DispatchSupervisorError";
 		this.code = code;
 		this.conflict = details.conflict;
+		this.reviewConflict = details.reviewConflict;
 	}
 }
 
@@ -128,6 +139,8 @@ export interface SuperviseWorkOrderInput {
 	/** Package E passes the non-interactive result of its --wait/--kill prompt here. */
 	readonly orphanAction?: OrphanAction;
 	readonly reviewerVendor?: string;
+	/** Review fix dispatches can continue the original delivered dispatch branch. */
+	readonly reuseBranch?: ReuseDispatchBranch;
 }
 
 type Candidate = WorkOrder["candidate_ladder"][number];
@@ -146,11 +159,16 @@ export interface SupervisorDependencies {
 		orderId: string,
 		env: NodeJS.ProcessEnv,
 	) => Promise<SupervisorLockRecord | undefined>;
+	readonly readReviewSupervisorRecord?: (
+		cycleId: string,
+		env: NodeJS.ProcessEnv,
+	) => Promise<SupervisorLockRecord | undefined>;
 	readonly timers?: DispatchTimerScheduler;
 	readonly sleep?: (delayMs: number) => Promise<void>;
 	readonly acquireLock?: (orderId: string, dependencies: SupervisorLockDependencies) => Promise<SupervisorLock>;
 	readonly load?: (orderId: string, env: NodeJS.ProcessEnv) => Promise<LoadedWorkOrder>;
 	readonly list?: (env: NodeJS.ProcessEnv) => Promise<LoadedWorkOrder[]>;
+	readonly listReviewCycles?: (env: NodeJS.ProcessEnv) => Promise<LoadedReviewCycle[]>;
 	readonly append?: (orderId: string, event: JournalEvent, env: NodeJS.ProcessEnv) => Promise<void>;
 	readonly resolveCommand?: (candidate: Candidate, env: NodeJS.ProcessEnv) => Promise<ResolvedAgentCommand | undefined>;
 	readonly runner?: AgentRunner;
@@ -394,6 +412,49 @@ async function readLockRecord(orderId: string, env: NodeJS.ProcessEnv): Promise<
 			throw new DispatchSupervisorError(
 				"MALFORMED_PEER_LOCK",
 				`order ${orderId} has invalid supervisor.lock JSON; refusing concurrent repository access`,
+				{ cause: error },
+			);
+		}
+		throw error;
+	}
+}
+
+async function readReviewLockRecord(
+	cycleId: string,
+	env: NodeJS.ProcessEnv,
+): Promise<SupervisorLockRecord | undefined> {
+	try {
+		const raw: unknown = JSON.parse(
+			await readFile(path.join(reviewCycleDirectory(cycleId, env), "supervisor.lock"), "utf8"),
+		);
+		if (
+			typeof raw === "object" &&
+			raw !== null &&
+			"pid" in raw &&
+			Number.isInteger(raw.pid) &&
+			Number(raw.pid) > 0 &&
+			"started_at" in raw &&
+			typeof raw.started_at === "string" &&
+			/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?(?:Z|[+-]\d{2}:\d{2})$/.test(raw.started_at) &&
+			Number.isFinite(Date.parse(raw.started_at))
+		) {
+			return { pid: Number(raw.pid), started_at: raw.started_at };
+		}
+		throw new DispatchSupervisorError(
+			"MALFORMED_PEER_LOCK",
+			`review cycle ${cycleId} has a malformed supervisor.lock; refusing concurrent repository access`,
+		);
+	} catch (error) {
+		if (errorCode(error) === "ENOENT" || errorCode(error) === "ENOTDIR") {
+			return undefined;
+		}
+		if (error instanceof DispatchSupervisorError) {
+			throw error;
+		}
+		if (error instanceof SyntaxError) {
+			throw new DispatchSupervisorError(
+				"MALFORMED_PEER_LOCK",
+				`review cycle ${cycleId} has invalid supervisor.lock JSON; refusing concurrent repository access`,
 				{ cause: error },
 			);
 		}
@@ -749,11 +810,13 @@ async function findRepositoryConflict(
 	env: NodeJS.ProcessEnv,
 	dependencies: {
 		list: NonNullable<SupervisorDependencies["list"]>;
+		listReviewCycles: NonNullable<SupervisorDependencies["listReviewCycles"]>;
 		realpath: NonNullable<SupervisorDependencies["realpath"]>;
 		readSupervisorRecord: NonNullable<SupervisorDependencies["readSupervisorRecord"]>;
+		readReviewSupervisorRecord: NonNullable<SupervisorDependencies["readReviewSupervisorRecord"]>;
 		isProcessAlive: NonNullable<SupervisorDependencies["isProcessAlive"]>;
 	},
-): Promise<SupervisorConflict | undefined> {
+): Promise<SupervisorConflict | ReviewSupervisorConflict | undefined> {
 	const targetRealpath = await dependencies.realpath(loaded.order.target_repo.path);
 	for (const other of await dependencies.list(env)) {
 		if (other.order.id === loaded.order.id || TERMINAL_ORDER_STATES.has(other.state)) {
@@ -771,6 +834,28 @@ async function findRepositoryConflict(
 		const record = await dependencies.readSupervisorRecord(other.order.id, env);
 		if (record && dependencies.isProcessAlive(record.pid)) {
 			return { code: "TARGET_REPOSITORY_BUSY", conflictingOrderId: other.order.id, targetRealpath };
+		}
+	}
+	for (const cycle of await dependencies.listReviewCycles(env)) {
+		if (TERMINAL_REVIEW_CYCLE_STATES.has(cycle.state)) {
+			continue;
+		}
+		let cycleRealpath: string;
+		try {
+			cycleRealpath = await dependencies.realpath(cycle.cycle.target_repo.path);
+		} catch {
+			continue;
+		}
+		if (cycleRealpath !== targetRealpath) {
+			continue;
+		}
+		const record = await dependencies.readReviewSupervisorRecord(cycle.cycle.id, env);
+		if (record && dependencies.isProcessAlive(record.pid)) {
+			return {
+				code: "TARGET_REPOSITORY_BUSY",
+				conflictingCycleId: cycle.cycle.id,
+				targetRealpath,
+			};
 		}
 	}
 	return undefined;
@@ -960,17 +1045,26 @@ export async function superviseWorkOrder(
 	const terminateProcessGroup = dependencies.terminateProcessGroup ?? terminateGroup;
 	const resolveRealpath = dependencies.realpath ?? fsRealpath;
 	const readSupervisorRecord = dependencies.readSupervisorRecord ?? readLockRecord;
+	const readReviewSupervisorRecord = dependencies.readReviewSupervisorRecord ?? readReviewLockRecord;
 	const timers = dependencies.timers ?? defaultTimers;
 	const sleep = dependencies.sleep ?? defaultSleep;
 	const acquireLock = dependencies.acquireLock ?? acquireSupervisorLock;
 	const load = dependencies.load ?? loadOrder;
 	const list = dependencies.list ?? listOrders;
+	const listReviewCycles = dependencies.listReviewCycles ?? listCycles;
 	const append = dependencies.append ?? appendJournalEvent;
 	const resolveCommand = dependencies.resolveCommand ?? defaultResolveCandidate;
 	const runner = dependencies.runner ?? runAgentCommand;
 	const prepareWorkspace = dependencies.prepareWorkspace ?? prepareDispatchWorkspace;
 	const resolveBaseOid = dependencies.resolveBaseOid ?? resolveDispatchBaseOid;
 	const activateWorkspace = dependencies.activateWorkspace ?? verifyDispatchWorkspaceActive;
+	const activateSelectedWorkspace = async (): Promise<void> => {
+		if (input.reuseBranch) {
+			await activateWorkspace(input.orderId, dependencies.git, input.reuseBranch);
+			return;
+		}
+		await activateWorkspace(input.orderId, dependencies.git);
+	};
 	const snapshot = dependencies.snapshot ?? createWipSnapshot;
 	const workspaceFingerprint = dependencies.workspaceFingerprint ?? readWorkspaceFingerprint;
 	const evidenceCheck = dependencies.evidence ?? checkDeliveryEvidence;
@@ -1043,11 +1137,20 @@ export async function superviseWorkOrder(
 		const conflictCheck = async (): Promise<void> => {
 			const conflict = await findRepositoryConflict(mutable.loaded, env, {
 				list,
+				listReviewCycles,
 				realpath: resolveRealpath,
 				readSupervisorRecord,
+				readReviewSupervisorRecord,
 				isProcessAlive,
 			});
 			if (conflict) {
+				if ("conflictingCycleId" in conflict) {
+					throw new DispatchSupervisorError(
+						"TARGET_REPOSITORY_BUSY",
+						`review cycle ${conflict.conflictingCycleId} already supervises ${conflict.targetRealpath}`,
+						{ reviewConflict: conflict },
+					);
+				}
 				throw new DispatchSupervisorError(
 					"TARGET_REPOSITORY_BUSY",
 					`order ${conflict.conflictingOrderId} already supervises ${conflict.targetRealpath}`,
@@ -1106,7 +1209,7 @@ export async function superviseWorkOrder(
 					});
 				}
 			}
-			await activateWorkspace(input.orderId, dependencies.git);
+			await activateSelectedWorkspace();
 			await checkpointWorkspace(run);
 			const killed: Run = {
 				...run,
@@ -1391,6 +1494,7 @@ export async function superviseWorkOrder(
 				{
 					orderId: input.orderId,
 					baseRef,
+					...(input.reuseBranch ? { reuseBranch: input.reuseBranch } : {}),
 					onBaseResolved: async (resolvedOid) => {
 						await persistBaseIdentity(orderDirectory, resolvedOid, idGenerator);
 						frozenBaseOid = resolvedOid;
@@ -1460,7 +1564,7 @@ export async function superviseWorkOrder(
 					}
 				}
 
-				await activateWorkspace(input.orderId, dependencies.git);
+				await activateSelectedWorkspace();
 				await checkpointWorkspace(orphan);
 				const evidence = await evidenceCheck(
 					{
@@ -1534,7 +1638,7 @@ export async function superviseWorkOrder(
 				return capped;
 			}
 			await conflictCheck();
-			await activateWorkspace(input.orderId, dependencies.git);
+			await activateSelectedWorkspace();
 			const { runId, candidate } = pending;
 			pending = undefined;
 			const resolved = await resolveCommand(candidate, env);

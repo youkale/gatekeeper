@@ -40,7 +40,7 @@ import {
 	superviseWorkOrder,
 } from "../dispatch/supervisor.js";
 import type { JournalEvent, Run, WorkOrder, WorkOrderStatus } from "../dispatch/types.js";
-import { DispatchWorkspaceError } from "../dispatch/workspace.js";
+import { DispatchWorkspaceError, type ReuseDispatchBranch } from "../dispatch/workspace.js";
 import { GitDiffError, resolveBaseRef, resolveRepo } from "../providers/gitdiff.js";
 import { GitHubProvider, type GitHubProviderOptions, InfraError } from "../providers/github.js";
 import {
@@ -585,6 +585,8 @@ export interface DispatchStartOptions {
 	yes?: boolean;
 	repo?: string;
 	registry?: string;
+	/** Internal review-fix seam; no CLI flag exposes branch reuse. */
+	reuseBranch?: ReuseDispatchBranch;
 }
 
 export async function runDispatchStart(
@@ -804,6 +806,7 @@ export async function runDispatchStart(
 			{
 				orderId: created.order.id,
 				baseRef,
+				...(options.reuseBranch ? { reuseBranch: options.reuseBranch } : {}),
 				...(options.runTimeout !== undefined ? { maxRunSeconds: options.runTimeout } : {}),
 			},
 			git,
