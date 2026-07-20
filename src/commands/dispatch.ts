@@ -1,4 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
+import { randomUUID as nodeRandomUUID } from "node:crypto";
 import { appendFile, readFile as fsReadFile, realpath as fsRealpath, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -88,6 +89,9 @@ type IssueProvider = Pick<GitHubProvider, "getIssue">;
 export interface DispatchCommandDependencies {
 	env?: NodeJS.ProcessEnv;
 	now?: () => Date;
+	/** Entropy source for `start`'s ad-hoc association-key suffix (T-20260721-01) -- a test seam mirroring
+	 * src/dispatch/store.ts's own `randomUUID` dependency, unrelated to that module's order-id generation. */
+	randomUUID?: () => string;
 	isInteractive?: boolean;
 	promptConfirm?: (message: string) => Promise<boolean>;
 	readFile?: (file: string) => Promise<string>;
@@ -556,8 +560,25 @@ function loadFailureExitCode(error: unknown): number {
 // dispatch start
 // ---------------------------------------------------------------------------
 
+/**
+ * `org/repo@adhoc-<id>` -- the association key `dispatch start --brief <file>` mints when no `--issue` is given at
+ * all (T-20260721-01's ad-hoc entry point, for work that never had a GitHub issue behind it). The `@adhoc-` marker
+ * deliberately cannot collide with the `#<digits>` issue-mode suffix `associationKeySchema` also accepts, so every
+ * downstream reader (dispatch-ledger lines, `dispatch status`'s association-key column, REVIEWER_VENDOR_CONFLICT
+ * text) can tell the two kinds of order apart at a glance. The suffix itself mirrors src/dispatch/store.ts's own
+ * `makeOrderId` entropy-to-id-safe-characters shape (lowercase, non-alphanumerics stripped, truncated) without
+ * importing that module directly -- store.ts is out of scope for this change.
+ */
+function generateAdHocAssociationKey(repo: string, randomUUIDFn: () => string): string {
+	const suffix = randomUUIDFn()
+		.toLowerCase()
+		.replace(/[^a-z0-9]/g, "")
+		.slice(0, 12);
+	return `${repo}@adhoc-${suffix}`;
+}
+
 export interface DispatchStartOptions {
-	issue: number;
+	issue?: number;
 	brief?: string;
 	agentCommand?: string;
 	runTimeout?: number;
@@ -573,6 +594,16 @@ export async function runDispatchStart(
 ): Promise<number> {
 	const env = dependencies.env ?? process.env;
 	const now = dependencies.now ?? (() => new Date());
+
+	if (options.issue === undefined && !options.brief) {
+		process.stderr.write(
+			"gatekeeper dispatch start: at least one of --issue <n> or --brief <file> is required " +
+				"(--issue alone dispatches a GitHub issue as before; --brief alone starts an ad-hoc order with no " +
+				"GitHub issue at all; both together use --brief as the task package with --issue only as the " +
+				"association key).\n",
+		);
+		return 2;
+	}
 
 	let discovered: DiscoveredConfig | null;
 	try {
@@ -636,21 +667,49 @@ export async function runDispatchStart(
 		return 2;
 	}
 
-	const key = `${repo}#${options.issue}`;
+	// options.issue drives the association key's shape: issue-mode (`org/repo#N`) when given, ad-hoc mode
+	// (`org/repo@adhoc-<id>`, T-20260721-01) when not -- the earlier guard above already guarantees --brief is set
+	// whenever --issue is absent, so an ad-hoc order is never created without an explicit task package.
+	const issueNumber = options.issue;
+	const key =
+		issueNumber !== undefined
+			? `${repo}#${issueNumber}`
+			: generateAdHocAssociationKey(repo, dependencies.randomUUID ?? nodeRandomUUID);
 
 	let brief: string;
 	let criteria: string[] = [];
 	if (options.brief) {
 		const briefPath = path.resolve(cwd, options.brief);
+		let briefFileContent: string;
 		try {
-			brief = await (dependencies.readFile ?? defaultReadFile)(briefPath);
+			briefFileContent = await (dependencies.readFile ?? defaultReadFile)(briefPath);
 		} catch (error) {
 			process.stderr.write(`gatekeeper dispatch start: failed to read --brief ${briefPath}: ${errorMessage(error)}\n`);
 			return 2;
 		}
+		// Issue mode (--issue and --brief both given): --brief remains the task package verbatim, unchanged from
+		// before T-20260721-01 -- the human owns the whole brief text. Ad-hoc mode (--brief alone): wrap it through
+		// the same brief-synthesis template issue mode uses, minus the "## Issue"/"## Triage 判断" sections (see
+		// src/render/dispatchBrief.ts's `task` field), so the ad-hoc coder still learns the RESULT.json delivery
+		// contract instead of silently never producing it.
+		brief =
+			issueNumber !== undefined
+				? briefFileContent
+				: renderDispatchBrief({
+						key,
+						repo,
+						task: briefFileContent,
+						contract: { resultPath: DEFAULT_RESULT_PATH, progressPath: DEFAULT_PROGRESS_PATH },
+					});
+	} else if (issueNumber === undefined) {
+		// Unreachable: the guard above already returns 2 when both --issue and --brief are absent, and this branch
+		// only runs when options.brief is falsy -- kept only so TypeScript can narrow issueNumber to `number` below
+		// without an unsound assertion.
+		process.stderr.write("gatekeeper dispatch start: internal error -- neither --issue nor --brief resolved\n");
+		return 2;
 	} else {
 		const synthesized = await synthesizeIssueBrief(
-			options.issue,
+			issueNumber,
 			key,
 			repo,
 			targetPath,

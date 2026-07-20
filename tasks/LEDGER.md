@@ -58,7 +58,7 @@
 
 | T-20260720-09 | 常规编码（文档化标准面） | dispatch F 包：docs/DISPATCH.md + README 节（拆解表F，双 review 不减） | sonnet-coder | claude(opus) PASS + grok 3 轮（2 blocker 均文档-代码矛盾类，逆向反查所得） | ✅ 验收提交 | tasks/records/T-20260720-09-dispatch-docs.md |
 
-| T-20260721-01 | 常规编码 | dispatch start 免 issue 发起（--issue 可选化 + ad-hoc 关联键；顺带修父级 --help 退出码措辞） | sonnet-coder | DISPATCH | 进行中 | - |
+| T-20260721-01 | 常规编码 | dispatch start 免 issue 发起（--issue 可选化 + ad-hoc 关联键；顺带修父级 --help 退出码措辞） | sonnet-coder | claude(opus)+grok 双 PASS 零 blocker | ✅ 验收提交（831 测试） | tasks/records/T-20260721-01-adhoc-dispatch.md |
 
 ### 遗留债队列（活动，v1.1 候选）
 

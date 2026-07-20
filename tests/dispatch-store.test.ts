@@ -14,7 +14,7 @@ import {
 	listOrders,
 	loadOrder,
 } from "../src/dispatch/store.js";
-import { type JournalEvent, runSchema } from "../src/dispatch/types.js";
+import { associationKeySchema, type JournalEvent, runSchema } from "../src/dispatch/types.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -65,6 +65,36 @@ function activeRun() {
 		out_path: "runs/r001/out",
 	};
 }
+
+describe("associationKeySchema (T-20260721-01 ad-hoc keys, backward compatible with historical org/repo#N)", () => {
+	it("still accepts every pre-existing org/repo#N issue-mode key (backward compatibility)", () => {
+		expect(associationKeySchema.safeParse("acme/widgets#42").success).toBe(true);
+		expect(associationKeySchema.safeParse("acme/widgets#1").success).toBe(true);
+	});
+
+	it("accepts a well-formed org/repo@adhoc-<id> ad-hoc key", () => {
+		expect(associationKeySchema.safeParse("acme/widgets@adhoc-abc123def456").success).toBe(true);
+	});
+
+	it("rejects malformed keys (neither shape)", () => {
+		expect(associationKeySchema.safeParse("acme/widgets").success).toBe(false);
+		expect(associationKeySchema.safeParse("acme/widgets#").success).toBe(false);
+		expect(associationKeySchema.safeParse("acme/widgets@adhoc-").success).toBe(false);
+		expect(associationKeySchema.safeParse("acme/widgets@adhoc-UPPER").success).toBe(false);
+	});
+
+	it("createOrder persists and loadOrder re-reads an ad-hoc-keyed order unchanged (round trip)", async () => {
+		const configDirectory = await makeConfigDirectory("gatekeeper-dispatch-store-adhoc-");
+		const created = await createOrder(
+			{ ...input(), association_key: "acme/widgets@adhoc-abc123def456" },
+			fixedDependencies(configDirectory),
+		);
+		expect(created.order.association_key).toBe("acme/widgets@adhoc-abc123def456");
+
+		const reloaded = await loadOrder(created.order.id, { GATEKEEPER_CONFIG_DIR: configDirectory });
+		expect(reloaded.order.association_key).toBe("acme/widgets@adhoc-abc123def456");
+	});
+});
 
 describe("runSchema", () => {
 	it("enforces active/terminal fields, exit semantics, canonical ids, and id-derived paths", () => {

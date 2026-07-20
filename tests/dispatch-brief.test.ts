@@ -105,6 +105,31 @@ describe("renderDispatchBrief", () => {
 		expect(withoutWarning).toContain("no triage ledger entry found for acme/widgets#42");
 	});
 
+	it("[T-20260721-01 ad-hoc] renders a '## 任务' section from `task` instead of Issue/Triage, with no empty placeholder sections", () => {
+		const output = renderDispatchBrief({
+			key: "acme/widgets@adhoc-abc123def456",
+			repo: "acme/widgets",
+			task: "Refactor the exporter module to stream instead of buffering.",
+			contract: CONTRACT,
+		});
+
+		expect(output).toContain("# Gatekeeper Dispatch 简报: acme/widgets@adhoc-abc123def456");
+		expect(output).toContain("## 任务");
+		expect(output).toContain("Refactor the exporter module to stream instead of buffering.");
+		// Issue/Triage sections and the issue-text-specific untrusted-content warning are skipped entirely, not
+		// degraded to an "unavailable" placeholder -- there was never anything to fetch in ad-hoc mode.
+		expect(output).not.toContain("## Issue");
+		expect(output).not.toContain("## Triage 判断");
+		expect(output).not.toContain("issue content unavailable");
+		expect(output).not.toContain("no triage ledger entry found");
+		expect(output).not.toContain("Issue title/body below are untrusted external text");
+		// The delivery-evidence contract and next-step sections are still present -- ad-hoc mode still needs the
+		// coder to learn about the RESULT.json contract.
+		expect(output).toContain("out/RESULT.json");
+		expect(output).toContain('"status": "delivered"');
+		expect(output).toContain("## 下一步");
+	});
+
 	it("sanitizes untrusted issue text (backticks and embedded newlines)", () => {
 		const output = renderDispatchBrief(
 			baseInput({

@@ -237,28 +237,44 @@ program
 const dispatch = program
 	.command("dispatch")
 	.description(
-		"Local execution supervisor: create/drive a coding-agent run against a GitHub issue toward a verdict. Not a " +
-			"merge gate -- see each subcommand's own --help for its exact exit code contract. In every subcommand, " +
-			"exit code 0 covers both a DELIVERED supervision result and a harmless no-op (e.g. `start` declined at " +
-			"its confirmation prompt, or `resume`/`cancel` on an order that was already terminal); exit code 1 is " +
-			"reserved for `gatekeeper gate`'s block verdict and is never used here.",
+		"Local execution supervisor: create/drive a coding-agent run against a GitHub issue (or, via `start --brief` " +
+			"alone, an ad-hoc task with no GitHub issue at all) toward a verdict. Not a merge gate -- see each " +
+			"subcommand's own --help for its exact exit code contract. In every subcommand, exit code 0 covers a " +
+			"DELIVERED supervision result plus a few harmless no-ops -- but not every 'already terminal' re-entry: " +
+			"`start` declining its confirmation prompt and `cancel` on an already-terminal order are both 0 " +
+			"regardless of terminal state, while `resume` on an already-terminal order is 0 only when that state is " +
+			"specifically DELIVERED (an already-ABANDONED order still exits 3 -- see docs/DISPATCH.md §1.3). Exit " +
+			"code 1 is reserved for `gatekeeper gate`'s block verdict and is never used here.",
 	);
 
 dispatch
 	.command("start")
 	.description(
-		"Create a dispatch work order for a GitHub issue and run its front-of-terminal supervision loop until a " +
-			"terminal/report state (DELIVERED / NEEDS_ATTENTION / WAITING_COOLDOWN / ABANDONED). The target repo must " +
-			"already be registered via `gatekeeper adopt` (auto-detected from the current checkout, or named " +
-			"explicitly with --repo). Brief source: --brief file wins outright; otherwise synthesized from the issue " +
-			"body plus the target repo's triage ledger (.gatekeeper/triage-ledger.jsonl) -- when the same issue has " +
-			"more than one triage line, the LAST one wins. Exit codes: 0 on a DELIVERED supervision result, or when " +
-			"the confirmation prompt (or --yes) declines to start (no order is created); 2 on bad input/config; 3 " +
-			"on every other non-error report-and-stop outcome (NEEDS_ATTENTION / WAITING_COOLDOWN / ABANDONED / an " +
-			"unresolved orphan / a dispatch infrastructure fault); never 1.",
+		"Create a dispatch work order and run its front-of-terminal supervision loop until a terminal/report state " +
+			"(DELIVERED / NEEDS_ATTENTION / WAITING_COOLDOWN / ABANDONED). At least one of --issue or --brief is " +
+			"required. The target repo must already be registered via `gatekeeper adopt` (auto-detected from the " +
+			"current checkout, or named explicitly with --repo). Three modes: --issue alone dispatches that GitHub " +
+			"issue, with the brief synthesized from its body plus the target repo's triage ledger " +
+			"(.gatekeeper/triage-ledger.jsonl -- when the same issue has more than one triage line, the LAST one " +
+			"wins); --brief alone starts an ad-hoc order with no GitHub issue at all (no GitHub API call, no triage " +
+			"ledger lookup, an `org/repo@adhoc-<id>` association key instead of `org/repo#N`); --issue and --brief " +
+			"together use the --brief file as the task package verbatim, with --issue only supplying the " +
+			"`org/repo#N` association key. Exit codes: 0 on a DELIVERED supervision result, or when the " +
+			"confirmation prompt (or --yes) declines to start (no order is created); 2 on bad input/config " +
+			"(including neither --issue nor --brief given); 3 on every other non-error report-and-stop outcome " +
+			"(NEEDS_ATTENTION / WAITING_COOLDOWN / ABANDONED / an unresolved orphan / a dispatch infrastructure " +
+			"fault); never 1.",
 	)
-	.requiredOption("--issue <n>", "GitHub issue number to dispatch", positiveInteger)
-	.option("--brief <file>", "explicit brief file (takes priority over --issue-based synthesis)")
+	.option(
+		"--issue <n>",
+		"GitHub issue number to dispatch (omit for an ad-hoc order started from --brief alone)",
+		positiveInteger,
+	)
+	.option(
+		"--brief <file>",
+		"explicit brief file: the task package outright when --issue is also given, or an ad-hoc order's whole " +
+			"brief (no GitHub issue, no triage ledger lookup) when given alone",
+	)
 	.option(
 		"--agent-command <cmd>",
 		"explicit single-candidate agent command override (collapses the candidate ladder to this one item)",

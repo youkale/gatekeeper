@@ -601,6 +601,26 @@ describe("M2 CLI e2e: gatekeeper dispatch resume --help (T-20260720-07 R2 wiring
 	});
 });
 
+describe("M2 CLI e2e: gatekeeper dispatch --help (T-20260721-01 exit-code precision fix)", () => {
+	it("no longer claims resume on an already-terminal order is uniformly exit 0 -- only DELIVERED is", () => {
+		const help = runCli(process.cwd(), ["dispatch", "--help"]);
+		expect(help.status).toBe(0);
+		expect(help.stdout).toContain("specifically DELIVERED");
+		expect(help.stdout).toContain("still exits 3");
+		expect(help.stdout).not.toContain("resume/cancel on an order that was already terminal");
+	});
+});
+
+describe("M2 CLI e2e: gatekeeper dispatch start --help (T-20260721-01 ad-hoc --brief entry point)", () => {
+	it("documents --issue as optional and the ad-hoc --brief-alone mode", () => {
+		const help = runCli(process.cwd(), ["dispatch", "start", "--help"]);
+		expect(help.status).toBe(0);
+		expect(help.stdout).toContain("At least one of --issue or --brief is");
+		expect(help.stdout).toContain("ad-hoc order with no GitHub issue at all");
+		expect(help.stdout).toContain("org/repo@adhoc-<id>");
+	});
+});
+
 describe("gitdiff parseNameStatusZ status normalization", () => {
 	it("normalizes type-change T and unmerged U to M instead of silently dropping them", () => {
 		const files = parseNameStatusZ("T\0scripts/guarded.sh\0U\0conflicted.txt\0");

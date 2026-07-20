@@ -70,12 +70,24 @@ const candidateSchema = z
 	})
 	.strict();
 
+/**
+ * Either GitHub-issue-backed (`org/repo#N`, the original/default form) or ad-hoc (`org/repo@adhoc-<id>`,
+ * `gatekeeper dispatch start --brief <file>` with no `--issue` -- T-20260721-01's issue-free entry point). The two
+ * forms are deliberately distinguished by separator (`#` vs `@adhoc-`) so every reader downstream (dispatch-ledger
+ * lines, `dispatch status`'s association-key column, REVIEWER_VENDOR_CONFLICT text) can tell at a glance which kind
+ * of order it is without a separate flag. Backward compatible: every pre-existing `org/repo#N` order.yaml on disk
+ * still parses unchanged.
+ */
+export const associationKeySchema = z
+	.string()
+	.regex(/^[^/\s]+\/[^/\s]+(?:#\d+|@adhoc-[a-z0-9][a-z0-9-]*)$/, "must be org/repo#issue or org/repo@adhoc-<id>");
+
 /** Immutable order.yaml fields plus the deliberately small mutable authoring-vendor set. */
 export const workOrderSchema = z
 	.object({
 		apiVersion: z.literal("gatekeeper/v1"),
 		id: orderIdSchema,
-		association_key: z.string().regex(/^[^/\s]+\/[^/\s]+#\d+$/, "must be org/repo#issue"),
+		association_key: associationKeySchema,
 		target_repo: targetRepoSchema,
 		role: z.literal("coder"),
 		/** Stable reference to the canonical original brief stored alongside order.yaml, without duplicating it in YAML. */

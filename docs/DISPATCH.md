@@ -25,7 +25,7 @@ Dispatch has its own fail-direction law, distinct from (and never overriding) `g
 | Exit code | Meaning |
 | --- | --- |
 | `0` | Normal flow only: a `DELIVERED` supervision result (from `start`, `resume`, or `cancel`'s `RUNNING`-branch evidence-first reconciliation, §5.2); `start` declining its confirmation prompt (no order created); `cancel` on an order that is already terminal, whether `DELIVERED` **or** `ABANDONED` (an unconditional no-op either way); or `resume` on an order that is already terminal **and specifically `DELIVERED`**. `status` and `logs` are unconditionally `0` on success and have no "already terminal" special case at all (§3.1) — they read and report state regardless of terminality. |
-| `2` | User/config error: bad flags, an unregistered repo, a missing `--brief` file, an unknown/malformed order id, an unresolvable `--agent`, or a state transition the CLI itself refuses because `src/dispatch/machine.ts` has no journal edge for it (e.g. cancelling a still-`PENDING` order). |
+| `2` | User/config error: bad flags, `start` given neither `--issue` nor `--brief` (§1.5), an unregistered repo, a missing `--brief` file, an unknown/malformed order id, an unresolvable `--agent`, or a state transition the CLI itself refuses because `src/dispatch/machine.ts` has no journal edge for it (e.g. cancelling a still-`PENDING` order). |
 | `3` (`DISPATCH_ATTENTION_EXIT_CODE`) | Dispatch's own report-and-stop outcome: a non-`DELIVERED` terminal/report supervision result (`NEEDS_ATTENTION`, `WAITING_COOLDOWN`, `ABANDONED`, an unresolved orphan); `resume` on an already-`ABANDONED` order (prints "already terminal; nothing to resume" but still exits `3`, not `0` — `ABANDONED` is a report-and-stop terminal, not a delivered one); `cancel` completing a *new* cancellation to `ABANDONED` (from `RUNNING`, `WAITING_COOLDOWN`, or `NEEDS_ATTENTION` — even though the cancellation itself succeeded); or an infrastructure fault raised by `src/dispatch/*` once supervision was already under way. |
 | `1` | Never used by dispatch — reserved for `gatekeeper gate`'s block verdict. |
 
@@ -34,6 +34,15 @@ Dispatch has its own fail-direction law, distinct from (and never overriding) `g
 ### 1.4 Fork-PR safety
 
 Dispatch only operates on a local, registered (`gatekeeper adopt`) checkout, on a dedicated branch (`gatekeeper/dispatch/<order-id>`) cut from a configured local base. It never fetches, checks out, or executes a pull-request head ref; `src/dispatch/workspace.ts`'s `assertSafeDispatchBaseRef` rejects any base ref that looks like `refs/pull/*`, `FETCH_HEAD`, or a merge-request ref before any git command runs. The brief handed to the agent never instructs it to do otherwise (`src/render/dispatchBrief.ts`).
+
+### 1.5 Association key: issue-mode vs. ad-hoc
+
+Every work order carries an `association_key` (`src/dispatch/types.ts`'s `associationKeySchema`) in one of two mutually exclusive, visually distinct forms:
+
+- **Issue-mode**, `org/repo#N` — the original/default form, minted whenever `gatekeeper dispatch start --issue <n>` is given an issue number (with or without `--brief`).
+- **Ad-hoc**, `org/repo@adhoc-<id>` — minted by `gatekeeper dispatch start --brief <file>` when **no** `--issue` is given at all (T-20260721-01): work with no GitHub issue behind it at all. Ad-hoc mode makes zero GitHub API calls and never looks at the target repo's triage ledger — the `--brief` file is the entire task package. Its brief still goes through the same synthesis template issue-mode briefs use (so the RESULT.json/PROGRESS.md delivery-evidence contract and the branch/commit instructions are always present), just with the "## Issue" and "## Triage 判断" sections omitted outright rather than degraded to an "unavailable" placeholder (`src/render/dispatchBrief.ts`'s `task` field).
+
+Every other consumer of `association_key` — `dispatch status`'s summary/detail views, `.gatekeeper/dispatch-ledger.jsonl` lines, `REVIEWER_VENDOR_CONFLICT` warnings, `resume`/`cancel`/`logs` — treats the key as an opaque string and works identically for both forms; only its shape differs. `associationKeySchema` accepts both forms unconditionally, so every pre-existing `org/repo#N` order on disk keeps parsing unchanged (backward compatible).
 
 ## 2. RESULT.json contract (the delivery evidence)
 
