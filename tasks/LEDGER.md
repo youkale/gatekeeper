@@ -58,7 +58,13 @@
 
 | T-20260720-09 | 常规编码（文档化标准面） | dispatch F 包：docs/DISPATCH.md + README 节（拆解表F，双 review 不减） | sonnet-coder | claude(opus) PASS + grok 3 轮（2 blocker 均文档-代码矛盾类，逆向反查所得） | ✅ 验收提交 | tasks/records/T-20260720-09-dispatch-docs.md |
 
+| T-20260721-01 | 常规编码 | dispatch start 免 issue 发起（--issue 可选化 + ad-hoc 关联键；顺带修父级 --help 退出码措辞） | sonnet-coder | DISPATCH | 进行中 | - |
+
 ### 遗留债队列（活动，v1.1 候选）
+
+- [dogfood] codex headless 模板缺沙箱写权限旗标（dispatch 用途下无法 commit，首个生产订单实证）
+- [dogfood] 非流式 CLI（claude -p）运行期零输出 → stall 检测盲区，需替代活动信号或 per-CLI 阈值
+
 
 - [接入信号] init-control 给总控仓自身写 .gatekeeper.yml（hub 侧零参数）
 - [接入信号] gatekeeper 进 GitLab runner（npm 发布或烧进 syncify-ci 镜像）——CI 注入的硬前置

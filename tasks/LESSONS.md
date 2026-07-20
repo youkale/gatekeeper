@@ -19,6 +19,8 @@
 - [T-20260720-06/-07] 接口消费方是设计兑现度的最好检验：D 包三路 review 全 PASS 后，设计 §2 明文的 resume 边缺失仍未被发现，直到 E 包实现消费时才暴露 → 复杂子系统的分包交付中，"上游包 review 通过"不等于"设计兑现完整"，下游消费包的偏离项报告是必须认真读的设计审计信号 → 处置：本条留档。
 - [dispatch 冒烟 2026-07-20] {out} 占位符文件/目录语义歧义：调度者自己写冒烟脚本首跑即误用（当目录），证据门正确拦下但暴露契约文本可误读——已在 DISPATCH.md 加精确性说明；同时验证了"exit 0 + 有 commit 但 RESULT.json 缺位 → EXITED_NO_EVIDENCE"的铁律行为真实生效 → 处置：文档已修，dogfood 首条真实证据留档。
 
+- [dispatch 首个生产交付 2026-07-20] syncify-hub CHANGELOG 重写（真需求）经完整阶梯交付：codex 真实完成改写但其沙箱禁写 .git → 按契约诚实报 blocked → AGENT_BLOCKED 升级 → 监督器 WIP 快照保全成果 → resume 换 claude 收尾 → 真实 commit + RESULT.json 双证据 DELIVERED（authoring_vendors: openai+anthropic，REVIEWER_VENDOR_CONFLICT 正确建议 anthropic 之外的审者……实为 openai 之外）。全链设计逐环兑现。产品发现两条：① codex headless 模板缺沙箱写权限旗标（KNOWN_AGENT_CLIS 需按 dispatch 用途配置，记债）；② claude headless 非流式输出（运行期日志 0 字节）对基于日志增长的 stall 检测是盲区，短任务未触发但长任务有误杀风险（记债：非流式 CLI 的活动信号替代方案或 per-CLI 阈值）→ 处置：两条入 LEDGER 遗留债。
+
 ## MVP 收官总复盘（2026-07-18）
 
 - **三路对抗 review 的量化战绩**：8 个任务、约 20 轮 review，三路合计报出 30+ 实质缺陷，其中跨路零重叠的独家发现占多数（claude 擅长 fail 方向全路径与语义一致性、codex 擅长权限拓扑/时序绕关/外部事实权威取证、grok 擅长字节级完整性与文件形态）。任何双路组合都会漏掉至少一类。dogfooding 结论：产品的 M-of-N 跨厂商 lane 设计有实证支撑。
