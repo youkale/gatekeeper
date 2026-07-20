@@ -19,6 +19,17 @@ import { runGate } from "./commands/gate.js";
 import { registerInitCommand } from "./commands/init.js";
 import { runInitControl } from "./commands/init-control.js";
 import { runProvision } from "./commands/provision.js";
+import {
+	runReviewAccept,
+	runReviewArbitrate,
+	runReviewCancel,
+	runReviewFix,
+	runReviewLogs,
+	runReviewRender,
+	runReviewResume,
+	runReviewStart,
+	runReviewStatus,
+} from "./commands/review.js";
 import { runStats } from "./commands/stats.js";
 import { runTriage } from "./commands/triage.js";
 import { runValidate } from "./commands/validate.js";
@@ -384,6 +395,219 @@ dispatch
 	.argument("<order-id>", "order id (wo-...)")
 	.action(async (orderId) => {
 		process.exitCode = await runDispatchCancel({ orderId }, process.cwd());
+	});
+
+const review = program
+	.command("review")
+	.description(
+		"Local review-cycle supervisor: drive N reviewer-CLI lanes through an adversarial diff review, machine-harvest " +
+			"structured VERDICT.json judgements, and cycle blocker -> fix -> incremental-re-review rounds until a human " +
+			"terminates the cycle (accept or arbitrate). Not a merge gate -- see each subcommand's own --help for its " +
+			"exact exit code contract. In every subcommand, exit code 0 covers ACCEPTED plus a few harmless no-ops " +
+			"(a declined confirmation, an already-ACCEPTED re-entry); exit code 2 is a user/config error; every other " +
+			"non-error outcome (BLOCKED / ARBITRATION / WAITING_COOLDOWN / AWAITING_ACCEPT / ABANDONED / a review " +
+			"infrastructure fault) is report-and-stop, exit 3. Exit code 1 is reserved for `gatekeeper gate`'s block " +
+			"verdict and is never used here.",
+	);
+
+review
+	.command("start")
+	.description(
+		"Create a review cycle and run its front-of-terminal supervision loop for one round, until a report state " +
+			"(AWAITING_ACCEPT / BLOCKED / ARBITRATION / WAITING_COOLDOWN). The subject is either a dispatch order id " +
+			"(reads its authoring_vendors automatically) or, with --diff, an ad-hoc local diff (--authored-by declares " +
+			"the authoring vendors explicitly; omitting it warns that the cross-vendor exclusion will not be enforced). " +
+			"The reviewer-tier lane route is frozen at creation: detected reviewer-capable agent CLIs, ordered by " +
+			"roles-policy.yaml's reviewer tier preference and excluding every authoring vendor -- the first " +
+			"reviewer.count CLIs become required lanes, any further detected CLI becomes advisory (never blocks the " +
+			"round, always runs). A required-lane shortfall refuses to start unless --allow-degraded, which proceeds " +
+			"with fewer required lanes and marks the cycle DEGRADED (recorded on every review-ledger line it produces). " +
+			"Exit codes: 0 when the confirmation prompt (or --yes) declines to start (no cycle is created); 2 on bad " +
+			"input/config (including a required-lane shortfall without --allow-degraded); 3 on every report state " +
+			"above, or a review infrastructure fault; never 1.",
+	)
+	.argument("[dispatch-order-id]", "dispatch order id (wo-...) to review; omit when --diff is given")
+	.option("--diff", "review an ad-hoc local diff instead of a dispatch order", false)
+	.option("--base <ref>", "diff base ref (required with --diff)")
+	.option("--head <ref>", "diff head ref (defaults to HEAD, only meaningful with --diff)")
+	.option(
+		"--authored-by <vendor>",
+		"declare a --diff subject's authoring vendor, excluded from the reviewer lane route (repeatable; omitting it " +
+			"warns that cross-vendor exclusion is not enforced)",
+		collect,
+		[],
+	)
+	.option(
+		"--allow-degraded",
+		"proceed with fewer than the configured required reviewer lanes, marking the cycle DEGRADED",
+		false,
+	)
+	.option(
+		"--max-parallel <n>",
+		"maximum reviewer lanes to run concurrently (defaults to the required-lane count)",
+		positiveInteger,
+	)
+	.option(
+		"--yes",
+		"skip the interactive y/N confirmation before starting review supervision (required when stdin is not a TTY)",
+		false,
+	)
+	.action(async (subject, options) => {
+		process.exitCode = await runReviewStart({ ...options, subject }, process.cwd());
+	});
+
+review
+	.command("status")
+	.description(
+		"Show every review cycle's one-line summary, or (given a cycle id) one cycle's full detail: subject, target " +
+			"repo, lane route, round history, and the state's own next-command hint (WAITING_COOLDOWN's resumable-at " +
+			"time is not tracked separately -- see `review logs`/the journal for it). --report additionally recomputes " +
+			"the latest round's aggregated blockers (NEW_IN_INCREMENTAL entries sorted first for an incremental round), " +
+			"every required/advisory lane's raw VERDICT.json, an advisory-lane-FAIL notice, waived blockers, and a " +
+			"subject-fingerprint check against the target repo's current HEAD. Read-only; never mutates a cycle. Exit " +
+			"codes: 0 normally; 2 for an unknown/malformed cycle id; 3 on any other review store read fault; never 1.",
+	)
+	.argument("[cycle-id]", "cycle id (rc-...); omit to list every cycle")
+	.option("--json", "emit machine-readable JSON instead of the human-readable summary", false)
+	.option(
+		"--report",
+		"include the latest round's full report material (blockers, raw verdicts, fingerprint check)",
+		false,
+	)
+	.action(async (cycleId, options) => {
+		process.exitCode = await runReviewStatus({ ...options, cycleId }, process.cwd());
+	});
+
+review
+	.command("logs")
+	.description(
+		"Print a round's lane log/brief/verdict file paths and each lane's stdout/stderr tail (last 50 lines each). " +
+			"Defaults to the latest round and every lane in it. Exit codes: 0 normally; 2 for an unknown/malformed " +
+			"cycle id, a cycle with no rounds yet, an unknown --round, or an unknown --lane; 3 on any other review " +
+			"store read fault; never 1.",
+	)
+	.argument("<cycle-id>", "cycle id (rc-...)")
+	.option("--round <RN>", "which round to show, e.g. R2 or 2 (defaults to the latest round)")
+	.option("--lane <LN>", "which lane to show, e.g. L1-codex (defaults to every lane in the round)")
+	.action(async (cycleId, options) => {
+		process.exitCode = await runReviewLogs({ ...options, cycleId }, process.cwd());
+	});
+
+review
+	.command("fix")
+	.description(
+		"Apply human blocker decisions for a BLOCKED (or AWAITING_ACCEPT, advisory-only) cycle, dispatch the original " +
+			"coding agent back to fix exactly the still-open blockers, then automatically run the next incremental " +
+			"review round -- one command, front-of-terminal, printing a phase banner as each phase actually starts " +
+			"(fix dispatch/supervision, then the incremental review round). Every blocker not named by --waive is left " +
+			"open and included in the fix brief. --waive <blocker-id>=<reason> records a human waiver (reason " +
+			"required, non-empty) and excludes that blocker from the fix brief; AWAITING_ACCEPT cannot waive (there is " +
+			"nothing BLOCKED to waive) -- use --adopt <advisory-id> there to promote an advisory finding into the fix. " +
+			"Interrupted (Ctrl-C)? Run `gatekeeper review resume <cycle-id>` to continue from the last durable " +
+			"checkpoint. Exit codes: 0 when the confirmation prompt (or --yes) declines to proceed; 2 on bad input " +
+			"(an unknown/malformed cycle id, wrong cycle state, a malformed --waive, waiving from AWAITING_ACCEPT, or " +
+			"an unknown --waive/--adopt blocker id); 3 on every report state the resulting round reaches, or a " +
+			"review/dispatch infrastructure fault; never 1.",
+	)
+	.argument("<cycle-id>", "cycle id (rc-...)")
+	.option("--waive <blocker-id=reason>", "waive a blocker with a required, non-empty reason (repeatable)", collect, [])
+	.option(
+		"--adopt <advisory-id>",
+		"adopt an advisory (non-required-lane) finding into the fix brief (repeatable)",
+		collect,
+		[],
+	)
+	.option(
+		"--yes",
+		"skip the interactive y/N confirmation before dispatching the fix (required when stdin is not a TTY)",
+		false,
+	)
+	.action(async (cycleId, options) => {
+		process.exitCode = await runReviewFix({ ...options, cycleId }, process.cwd());
+	});
+
+review
+	.command("accept")
+	.description(
+		"Terminate an AWAITING_ACCEPT or ARBITRATION cycle as ACCEPTED and append a review-ledger line to the target " +
+			"repo's .gatekeeper/review-ledger.jsonl. Exit codes: 0 on success; 2 for an unknown/malformed cycle id, or " +
+			"when the cycle is in any other state; 3 on a review infrastructure fault (including a lock currently held " +
+			"by a live supervision process); never 1.",
+	)
+	.argument("<cycle-id>", "cycle id (rc-...)")
+	.option("--note <text>", "optional note recorded on the acceptance journal event and ledger line")
+	.action(async (cycleId, options) => {
+		process.exitCode = await runReviewAccept({ ...options, cycleId }, process.cwd());
+	});
+
+review
+	.command("arbitrate")
+	.description(
+		"Resolve an ARBITRATION cycle (round limit reached, or a required lane could not be formed) with one of three " +
+			"human decisions: --decision accept terminates ACCEPTED (ledger line appended); --decision abandon " +
+			"terminates ABANDONED (ledger line appended); --decision extend grants exactly one additional round " +
+			"(max_rounds +1, journaled with --reason) and immediately runs it, front-of-terminal, to its own report " +
+			"state. Exit codes: 0 for --decision accept; 2 for an unknown/malformed cycle id, when the cycle is not in " +
+			"ARBITRATION, or when --reason is empty; 3 for --decision abandon, or for --decision extend's resulting " +
+			"report state / any review infrastructure fault; never 1.",
+	)
+	.argument("<cycle-id>", "cycle id (rc-...)")
+	.requiredOption("--reason <text>", "non-empty rationale for this arbitration decision (journaled)")
+	.addOption(
+		new Option("--decision <decision>", "arbitration decision")
+			.choices(["accept", "abandon", "extend"])
+			.makeOptionMandatory(true),
+	)
+	.action(async (cycleId, options) => {
+		process.exitCode = await runReviewArbitrate({ ...options, cycleId }, process.cwd());
+	});
+
+review
+	.command("resume")
+	.description(
+		"Reconcile journal/artifact skew, re-adjudicate any orphaned lane by its evidence, and continue a non-terminal " +
+			"cycle (WAITING_COOLDOWN resumes the cooled-down round; FIXING continues supervising its dispatched fix " +
+			"order; any other non-terminal state re-derives its report state from durable evidence) to its next report " +
+			"state. An already-terminal cycle is a no-op. Exit codes: 0 when the cycle is already ACCEPTED, or becomes " +
+			"ACCEPTED; 2 for an unknown/malformed cycle id; 3 when the cycle is already ABANDONED, or reaches any " +
+			"other report state, or a review infrastructure fault occurs; never 1.",
+	)
+	.argument("<cycle-id>", "cycle id (rc-...)")
+	.action(async (cycleId) => {
+		process.exitCode = await runReviewResume({ cycleId }, process.cwd());
+	});
+
+review
+	.command("cancel")
+	.description(
+		"Journal-terminate a non-terminal cycle as ABANDONED and append a review-ledger line. An already-terminal " +
+			"cycle is a no-op (exit 0). A PENDING cycle (never started) cannot be cancelled -- the review state " +
+			"machine has no PENDING -> ABANDONED transition; run `review start` first. Does not attempt to kill any " +
+			"live reviewer/fix subprocess -- while a live supervision process still holds the cycle's lock, this " +
+			"command cannot proceed at all (its lock acquisition fails and is reported as a fault) rather than racing " +
+			"it. Exit codes: 0 when the cycle was already terminal; 2 for an unknown/malformed cycle id or a still-" +
+			"PENDING cycle; 3 once cancellation lands on ABANDONED, or when it could not complete; never 1.",
+	)
+	.argument("<cycle-id>", "cycle id (rc-...)")
+	.action(async (cycleId) => {
+		process.exitCode = await runReviewCancel({ cycleId }, process.cwd());
+	});
+
+review
+	.command("render")
+	.description(
+		"Render a cycle's current state as a version-independent Markdown block, marked with its own sticky-comment " +
+			"marker (<!-- gatekeeper:review-verdict:v1 -->) -- deliberately never the gate's own sticky marker (<!-- " +
+			"gatekeeper:verdict -->), so a review-render comment and a gate-verdict comment can coexist on the same PR " +
+			"thread without colliding. Prints to stdout only -- publishing it as an actual PR comment/check-run (the " +
+			"only trusted way for a local review-ledger line to become gate evidence) is left to the caller's own " +
+			"trusted-identity publishing path; see docs/REVIEW.md. Exit codes: 0 normally; 2 for an unsupported " +
+			"--format or an unknown/malformed cycle id; 3 on any other review store read fault; never 1.",
+	)
+	.argument("<cycle-id>", "cycle id (rc-...)")
+	.requiredOption("--format <format>", 'output format (only "comment" is supported)')
+	.action(async (cycleId, options) => {
+		process.exitCode = await runReviewRender({ ...options, cycleId }, process.cwd());
 	});
 
 registerInitCommand(program);

@@ -25,6 +25,8 @@
 
 - [T-20260720-01 + T-20260721-05] codex 编码交付预写外审结论/终态 ×2（A 包自标台账 ✅、F 包 record 预写"三路 PASS"含未跑的 grok 路）→ 同类 ≥2 规范修订：**record 的外部审查节与 LEDGER 终态一律由调度者在外审完成后写入；编码 agent 任务包一律显式禁止**（本条起所有 codex/sonnet 任务包模板加此禁令）；grok 外审首次以时序核查抓获此类违规，纳入其常规检查面 → 处置：F 包 record 已更正；规范自本条生效。
 
+- [T-20260720-07 + T-20260721-08] CLI 空闲态命令异常穿透 exit 1 同族 ×2（dispatch cancel 的裸 try/finally 无 catch；review accept/arbitrate/cancel 的裸 finally release 抛错覆盖返回值）——两例都被 opus 探针在穿透点实锤 → 规范修订：**CLI 命令实现的任何路径不得让 promise reject；命令层持锁的 finally release 必须 try/catch 吞错告警（不覆盖已算好的退出码）；exit≠1 注入测试为 CLI 类任务包固定验收项** → 处置：本条起写入 CLI 类任务包模板。
+
 ## MVP 收官总复盘（2026-07-18）
 
 - **三路对抗 review 的量化战绩**：8 个任务、约 20 轮 review，三路合计报出 30+ 实质缺陷，其中跨路零重叠的独家发现占多数（claude 擅长 fail 方向全路径与语义一致性、codex 擅长权限拓扑/时序绕关/外部事实权威取证、grok 擅长字节级完整性与文件形态）。任何双路组合都会漏掉至少一类。dogfooding 结论：产品的 M-of-N 跨厂商 lane 设计有实证支撑。

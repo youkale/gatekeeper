@@ -589,6 +589,48 @@ describe("M2 CLI e2e: gatekeeper dispatch status (empty store)", () => {
 	});
 });
 
+describe("M2 CLI e2e: gatekeeper review status (empty store)", () => {
+	it("lists no cycles and exits 0 against a fresh GATEKEEPER_CONFIG_DIR", () => {
+		const tmpBase = mkdtempSync(path.join(tmpdir(), "gatekeeper-e2e-review-status-"));
+		try {
+			const configDir = path.join(tmpBase, "config");
+			const env = { GATEKEEPER_CONFIG_DIR: configDir };
+
+			const result = runCli(tmpBase, ["review", "status"], env);
+			expect(result.status).toBe(0);
+			expect(result.stdout).toContain("no cycles");
+
+			const jsonResult = runCli(tmpBase, ["review", "status", "--json"], env);
+			expect(jsonResult.status).toBe(0);
+			expect(JSON.parse(jsonResult.stdout)).toEqual({ cycles: [] });
+		} finally {
+			rmSync(tmpBase, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("M2 CLI e2e: gatekeeper review --help / subcommand --help", () => {
+	it("documents the exit-code contract and never claims exit code 1", () => {
+		const help = runCli(process.cwd(), ["review", "--help"]);
+		expect(help.status).toBe(0);
+		expect(help.stdout).toContain("never used here");
+
+		const start = runCli(process.cwd(), ["review", "start", "--help"]);
+		expect(start.status).toBe(0);
+		expect(start.stdout).toContain("--allow-degraded");
+		expect(start.stdout).toContain("never 1");
+
+		const fix = runCli(process.cwd(), ["review", "fix", "--help"]);
+		expect(fix.status).toBe(0);
+		expect(fix.stdout).toContain("--waive");
+		expect(fix.stdout).toContain("never 1");
+
+		const render = runCli(process.cwd(), ["review", "render", "--help"]);
+		expect(render.status).toBe(0);
+		expect(render.stdout).toContain("gatekeeper:review-verdict:v1");
+	});
+});
+
 describe("M2 CLI e2e: gatekeeper dispatch resume --help (T-20260720-07 R2 wiring)", () => {
 	it("documents the NEEDS_ATTENTION --agent resolution and exit-code contract, with no leftover 'not wired'/'not implemented' language", () => {
 		const help = runCli(process.cwd(), ["dispatch", "resume", "--help"]);

@@ -72,11 +72,13 @@
 
 | T-20260721-07 | 复杂编码 | review C 包：lane 并行监督器（最难包：spawn/重试/替补/冷却/只读指纹/孤儿对账/修复回派编排） | codex | claude(opus) 主路 2 轮 + 对抗 claude 替补路（grok 掉登录降级，补审记债）；崩溃搁浅 blocker 经 (b) 方案修复获独立裁定认可 | ✅ 验收提交（1006 测试，降级标注） | tasks/records/T-20260721-07-lane-supervisor.md |
 
-| T-20260721-08 | 常规编码 | review E 包：CLI 命令族 start/status/logs/fix/accept/arbitrate/resume/cancel/render + review-ledger（拆解表E） | sonnet-coder | DISPATCH | 进行中 | - |
+| T-20260721-08 | 常规编码 | review E 包：CLI 命令族 start/status/logs/fix/accept/arbitrate/resume/cancel/render + review-ledger（拆解表E） | sonnet-coder | claude(opus) 主路 2 轮 + 对抗 claude 替补（grok 缺席降级）；release 穿透 blocker 同族第 2 例触发规范修订 | ✅ 验收提交（1053 测试，降级标注） | tasks/records/T-20260721-08-review-cli.md |
+
+| T-20260721-09 | 常规编码（文档化标准面） | review G 包：docs/REVIEW.md + README 节（拆解表G，双 review 不减、双向核对） | sonnet-coder | DISPATCH | 进行中 | - |
 
 ### 遗留债队列（活动，v1.1 候选）
 
-- [降级补审] T-20260721-07 C 包 grok 补审（grok 掉登录期间由对抗 claude 替补，通道恢复后增量审）
+- [降级补审] T-20260721-07 C 包 + T-20260721-08 E 包 grok 补审（grok 掉登录期间由对抗 claude 替补，通道恢复后增量审）
 
 
 - [dogfood] codex headless 模板缺沙箱写权限旗标（dispatch 用途下无法 commit，首个生产订单实证）
