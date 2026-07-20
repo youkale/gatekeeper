@@ -62,7 +62,7 @@
 
 | T-20260721-02 | 架构设计 | review 闭环产品化设计：多路发起/verdict 证据门/轮次状态机/blocker 回派/仲裁升级（用户立项） | deep-reasoner | 设计交付，无 review 轮（实现包 A-G 各自走闭环） | ✅ 设计定稿（调度者已裁 2 项未决） | tasks/records/T-20260721-02-review-design.md |
 
-| T-20260721-03 | 复杂编码 | review A 包：cycle 类型/store/journal/九态状态机/锁复用（设计见 T-02 record） | codex | DISPATCH | 进行中 | - |
+| T-20260721-03 | 复杂编码 | review A 包：cycle 类型/store/journal/九态状态机/锁复用（含授权例外：dispatch/lock.ts 抽参数化 CAS 原语） | codex | codex 内审（降级自审，如实标注）+ 外审 claude(opus)/grok 双 PASS | ✅ 验收提交（872 测试） | tasks/records/T-20260721-03-review-cycle-foundation.md |
 
 ### 遗留债队列（活动，v1.1 候选）
 

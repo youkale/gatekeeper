@@ -78,6 +78,26 @@ export interface SupervisorLock {
 	release(): Promise<void>;
 }
 
+export interface HardLinkSupervisorLockTarget {
+	/** Existing directory that owns supervisor.lock. The primitive never creates it. */
+	readonly directory: string;
+	/** Exact supervisor.lock path inside directory. */
+	readonly lockPath: string;
+	readonly directoryNotFoundMessage: string;
+	readonly directoryNotDirectoryMessage: string;
+	readonly directoryInspectFailedMessage: string;
+	/** Durable takeover audit. Failure revokes the newly published lock before surfacing. */
+	readonly onTakeover: (previous: SupervisorLockRecord, current: SupervisorLockRecord) => Promise<void>;
+}
+
+export interface HardLinkSupervisorLock {
+	readonly record: SupervisorLockRecord;
+	readonly path: string;
+	release(): Promise<void>;
+}
+
+export type HardLinkSupervisorLockDependencies = Omit<SupervisorLockDependencies, "env" | "appendEvent">;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -361,41 +381,52 @@ function makeClaimRecord(
 }
 
 /**
- * Acquire the order's long-held supervisor.lock. Unlike config/filelock's
- * short callback lock, stale claim nodes are never unlinked or reused. Each
- * immutable owner token has exactly one deterministic successor path, and
- * contenders publish that successor via hard-link CAS, so two stale waiters
- * cannot both win or delete a newer owner. A released/dead owner remains as
- * audit structure and the next acquirer extends the chain.
+ * Parameterized long-held supervisor.lock primitive shared by dispatch and
+ * review. A config/filelock callback lock is insufficient here: the supervisor
+ * ownership spans arbitrary process work, while a blind stale-lock unlink lets
+ * two waiters both delete or replace a newer holder. Instead each contender
+ * writes and fsyncs an immutable uniquely-tokened claim node, then hard-links
+ * it to the one deterministic successor of the observed owner. `link()` is the
+ * CAS point: exactly one contender succeeds and every loser observes EEXIST.
+ * A successor is allowed only when the current immutable owner has published a
+ * release marker or its pid is dead; live unreleased owners remain exclusive.
+ *
+ * The long-held supervisor file itself is removed only after rereading and
+ * matching the exact `(pid, started_at)` ownership record, so an old release
+ * handle cannot unlink a replacement. A stale takeover is not complete until
+ * `onTakeover` durably records the caller-specific audit event; callback
+ * failure reacquires the claim chain and relinquishes the new supervisor file
+ * before escaping. Claim nodes and release markers intentionally remain as
+ * immutable audit/arbitration artifacts. This is a same-machine,
+ * same-filesystem protocol (hard links and pid liveness are the trust boundary),
+ * not a distributed or NFS lock. Callers supply directory diagnostics and
+ * audit semantics; this function never creates the owning directory.
  */
-export async function acquireSupervisorLock(
-	orderId: string,
-	dependencies: SupervisorLockDependencies = {},
-): Promise<SupervisorLock> {
-	const env = dependencies.env ?? process.env;
+export async function acquireHardLinkSupervisorLock(
+	target: HardLinkSupervisorLockTarget,
+	dependencies: HardLinkSupervisorLockDependencies = {},
+): Promise<HardLinkSupervisorLock> {
 	const pid = dependencies.pid ?? process.pid;
 	const now = dependencies.now ?? (() => new Date());
 	const entropy = dependencies.randomUUID ?? randomUUID;
 	const isProcessAlive = dependencies.isProcessAlive ?? defaultIsProcessAlive;
-	const appendEvent = dependencies.appendEvent ?? appendJournalEvent;
 	const sync = dependencies.sync ?? ((handle: FileHandle) => handle.sync());
-	const orderDirectory = dispatchOrderDirectory(orderId, env);
-	const lockPath = path.join(orderDirectory, SUPERVISOR_LOCK_FILENAME);
+	const lockPath = target.lockPath;
 	const guardPath = `${lockPath}.guard`;
 
 	try {
-		const orderStat = await stat(orderDirectory);
+		const orderStat = await stat(target.directory);
 		if (!orderStat.isDirectory()) {
-			throw new DispatchLockError("ORDER_NOT_FOUND", `order ${orderId} is not a directory`, lockPath);
+			throw new DispatchLockError("ORDER_NOT_FOUND", target.directoryNotDirectoryMessage, lockPath);
 		}
 	} catch (error) {
 		if (error instanceof DispatchLockError) {
 			throw error;
 		}
 		if (isMissingPathError(error)) {
-			throw new DispatchLockError("ORDER_NOT_FOUND", `order ${orderId} does not exist`, lockPath, { cause: error });
+			throw new DispatchLockError("ORDER_NOT_FOUND", target.directoryNotFoundMessage, lockPath, { cause: error });
 		}
-		throw new DispatchLockError("LOCK_IO_FAILED", `failed to inspect order ${orderId}`, lockPath, { cause: error });
+		throw new DispatchLockError("LOCK_IO_FAILED", target.directoryInspectFailedMessage, lockPath, { cause: error });
 	}
 
 	let recordCandidate: unknown;
@@ -447,17 +478,8 @@ export async function acquireSupervisorLock(
 	});
 
 	if (previous) {
-		const takeoverEvent: JournalEvent = {
-			apiVersion: "gatekeeper/v1",
-			type: "LOCK_TAKEN_OVER",
-			order_id: orderId,
-			at: record.started_at,
-			previous_pid: previous.pid,
-			previous_started_at: previous.started_at,
-			new_pid: record.pid,
-		};
 		try {
-			await appendEvent(orderId, takeoverEvent, env);
+			await target.onTakeover(previous, record);
 		} catch (error) {
 			const cleanupClaim = nextClaim();
 			await withSupervisorClaim(guardPath, lockPath, cleanupClaim, dependencies, () =>
@@ -471,7 +493,6 @@ export async function acquireSupervisorLock(
 
 	let released = false;
 	return {
-		orderId,
 		record,
 		path: lockPath,
 		async release() {
@@ -485,4 +506,42 @@ export async function acquireSupervisorLock(
 			released = true;
 		},
 	};
+}
+
+/**
+ * Acquire a dispatch order's long-held lock through the shared hard-link CAS
+ * primitive. This adapter intentionally retains the historical dispatch
+ * diagnostics, event construction, injected append seam, and event timing.
+ */
+export async function acquireSupervisorLock(
+	orderId: string,
+	dependencies: SupervisorLockDependencies = {},
+): Promise<SupervisorLock> {
+	const env = dependencies.env ?? process.env;
+	const appendEvent = dependencies.appendEvent ?? appendJournalEvent;
+	const orderDirectory = dispatchOrderDirectory(orderId, env);
+	const lockPath = path.join(orderDirectory, SUPERVISOR_LOCK_FILENAME);
+	const lock = await acquireHardLinkSupervisorLock(
+		{
+			directory: orderDirectory,
+			lockPath,
+			directoryNotFoundMessage: `order ${orderId} does not exist`,
+			directoryNotDirectoryMessage: `order ${orderId} is not a directory`,
+			directoryInspectFailedMessage: `failed to inspect order ${orderId}`,
+			async onTakeover(previous, record) {
+				const takeoverEvent: JournalEvent = {
+					apiVersion: "gatekeeper/v1",
+					type: "LOCK_TAKEN_OVER",
+					order_id: orderId,
+					at: record.started_at,
+					previous_pid: previous.pid,
+					previous_started_at: previous.started_at,
+					new_pid: record.pid,
+				};
+				await appendEvent(orderId, takeoverEvent, env);
+			},
+		},
+		dependencies,
+	);
+	return { orderId, ...lock };
 }
