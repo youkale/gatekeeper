@@ -64,6 +64,10 @@
 
 | T-20260721-03 | 复杂编码 | review A 包：cycle 类型/store/journal/九态状态机/锁复用（含授权例外：dispatch/lock.ts 抽参数化 CAS 原语） | codex | codex 内审（降级自审，如实标注）+ 外审 claude(opus)/grok 双 PASS | ✅ 验收提交（872 测试） | tasks/records/T-20260721-03-review-cycle-foundation.md |
 
+| T-20260721-04 | 复杂编码（准标准面） | review B 包：VERDICT.json 契约 + 证据门（token/round/只读三验，设计 §5） | codex | codex 内审 2 轮 + 外审 claude(opus)/grok 双 PASS 零 blocker | ✅ 验收提交（948 测试） | tasks/records/T-20260721-04-verdict-contract.md |
+
+| T-20260721-05 | 复杂编码 | review F 包：dispatch workspace 续分支可选模式 + busy 扫描纳入 review cycles（触碰已交付面，设计拆解表F） | codex | DISPATCH | 进行中 | - |
+
 ### 遗留债队列（活动，v1.1 候选）
 
 - [dogfood] codex headless 模板缺沙箱写权限旗标（dispatch 用途下无法 commit，首个生产订单实证）

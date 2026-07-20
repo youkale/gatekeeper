@@ -1,0 +1,165 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gatekeeper.dev/schema/review-verdict.schema.json",
+  "title": "Gatekeeper Review Verdict",
+  "description": "Strict v1 artifact emitted by one read-only review lane and validated against its brief token and round.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "verdict", "run_token", "round", "blockers", "non_blockers"],
+  "properties": {
+    "apiVersion": {
+      "description": "Version of the Gatekeeper review-verdict contract.",
+      "type": "string",
+      "const": "gatekeeper/v1"
+    },
+    "verdict": {
+      "description": "Lane judgment. A fail verdict requires blockers; a pass verdict forbids them.",
+      "type": "string",
+      "enum": ["pass", "fail"]
+    },
+    "run_token": {
+      "description": "Non-empty one-time token copied verbatim from this lane's generated brief.",
+      "type": "string",
+      "minLength": 1
+    },
+    "round": {
+      "description": "Positive integer review round for which this artifact was produced.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "blockers": {
+      "description": "Evidence-backed defects that make the lane fail. Empty exactly when verdict is pass.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/blocker"
+      }
+    },
+    "non_blockers": {
+      "description": "Advisory observations recorded without changing the lane verdict.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/nonBlocker"
+      }
+    },
+    "out_of_scope": {
+      "description": "Optional array of non-empty notes about observations deliberately excluded from this lane's review scope.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "verdict": {
+            "const": "fail"
+          }
+        },
+        "required": ["verdict"]
+      },
+      "then": {
+        "properties": {
+          "blockers": {
+            "minItems": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "verdict": {
+            "const": "pass"
+          }
+        },
+        "required": ["verdict"]
+      },
+      "then": {
+        "properties": {
+          "blockers": {
+            "maxItems": 0
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "blockerReference": {
+      "description": "Stable blocker id or prior-round reference in B-r{round}-L{lane}-{seq} form: positive non-zero-prefixed round/lane and sequence 01 through 99.",
+      "type": "string",
+      "pattern": "^B-r[1-9]\\d*-L[1-9]\\d*-(?:0[1-9]|[1-9]\\d)$"
+    },
+    "blocker": {
+      "description": "One concrete, evidence-backed defect found by the review lane.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "title", "evidence"],
+      "properties": {
+        "id": {
+          "description": "Optional stable identity minted for this blocker.",
+          "$ref": "#/$defs/blockerReference"
+        },
+        "ref": {
+          "description": "Optional intended reference to a blocker from an earlier review round; this schema validates syntax only.",
+          "$ref": "#/$defs/blockerReference"
+        },
+        "file": {
+          "description": "Non-empty file location supporting the blocker.",
+          "type": "string",
+          "minLength": 1
+        },
+        "line": {
+          "description": "Optional positive one-based line number in file.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "title": {
+          "description": "Concise non-empty blocker title.",
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence": {
+          "description": "Concrete non-empty evidence explaining why this is a blocker.",
+          "type": "string",
+          "minLength": 1
+        },
+        "suggested_fix": {
+          "description": "Optional non-empty remediation guidance for the authoring agent.",
+          "type": "string",
+          "minLength": 1
+        },
+        "category": {
+          "description": "Optional stable defect family used for reporting and prioritization.",
+          "type": "string",
+          "enum": ["correctness", "fail-direction", "security", "compat", "data-loss", "test"]
+        }
+      }
+    },
+    "nonBlocker": {
+      "description": "One advisory observation that does not fail the lane.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["note"],
+      "properties": {
+        "file": {
+          "description": "Optional non-empty file location for the observation.",
+          "type": "string",
+          "minLength": 1
+        },
+        "line": {
+          "description": "Optional positive one-based line number in file.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "note": {
+          "description": "Non-empty advisory observation.",
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}
