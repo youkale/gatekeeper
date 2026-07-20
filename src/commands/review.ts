@@ -197,7 +197,19 @@ function loadFailureExitCode(error: unknown): number {
 		: REVIEW_ATTENTION_EXIT_CODE;
 }
 
+/**
+ * `acquireReviewSupervisorLock` resolves `reviewCycleDirectory(cycleId, env)` (src/review/lock.ts:77) before its own
+ * try block (:79) -- a malformed cycle id therefore throws `ReviewStoreError("INVALID_DATA", ...)` directly, never
+ * wrapped as the `DispatchLockError` its catch clause maps to `ReviewLockError`. Without this branch that
+ * `ReviewStoreError` fell through to the generic REVIEW_ATTENTION_EXIT_CODE below, making a malformed id exit 3 here
+ * (accept/arbitrate) while exiting 2 everywhere else that only ever calls loadFailureExitCode (status/logs/fix/
+ * resume/cancel/render) -- the same bad input inconsistently classified across commands. Mirrors
+ * loadFailureExitCode's own INVALID_DATA handling; src/review/lock.ts itself is untouched.
+ */
 function lockFailureExitCode(error: unknown): number {
+	if (error instanceof ReviewStoreError && error.code === "INVALID_DATA") {
+		return 2;
+	}
 	return error instanceof ReviewLockError && error.code === "CYCLE_NOT_FOUND" ? 2 : REVIEW_ATTENTION_EXIT_CODE;
 }
 

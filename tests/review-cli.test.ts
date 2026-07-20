@@ -963,6 +963,18 @@ describe("runReviewAccept", () => {
 		expect(err.text().length).toBeGreaterThan(0);
 	});
 
+	it("exits 2 (never 3, never 1) for a malformed cycle id -- consistent with cancel/status/logs/fix/resume/render", async () => {
+		const configDirectory = await tempDir("gatekeeper-review-cli-config-");
+		const err = captureStderr();
+		const code = await runReviewAccept({ cycleId: "bad!!id" }, "/tmp", {
+			env: { GATEKEEPER_CONFIG_DIR: configDirectory },
+		});
+		expect(code).toBe(2);
+		expect(code).not.toBe(REVIEW_ATTENTION_EXIT_CODE);
+		expect(code).not.toBe(1);
+		expect(err.text().length).toBeGreaterThan(0);
+	});
+
 	it("accepts AWAITING_ACCEPT -> ACCEPTED and appends a review-ledger ACCEPTED line", async () => {
 		const targetPath = await tempDir("gatekeeper-review-cli-target-");
 		const { env, created } = await setupCycle({}, targetPath);
@@ -1040,6 +1052,18 @@ describe("runReviewArbitrate", () => {
 			await runReviewArbitrate({ cycleId: created.cycle.id, decision: "accept", reason: "ok" }, "/tmp", { env }),
 		).toBe(2);
 		expect(err.text()).toContain("arbitrate only applies to ARBITRATION");
+	});
+
+	it("exits 2 (never 3, never 1) for a malformed cycle id -- consistent with cancel/status/logs/fix/resume/render", async () => {
+		const configDirectory = await tempDir("gatekeeper-review-cli-config-");
+		const err = captureStderr();
+		const code = await runReviewArbitrate({ cycleId: "bad!!id", decision: "accept", reason: "ok" }, "/tmp", {
+			env: { GATEKEEPER_CONFIG_DIR: configDirectory },
+		});
+		expect(code).toBe(2);
+		expect(code).not.toBe(REVIEW_ATTENTION_EXIT_CODE);
+		expect(code).not.toBe(1);
+		expect(err.text().length).toBeGreaterThan(0);
 	});
 
 	it("--decision accept -> ACCEPTED (exit 0) with a review-ledger line", async () => {
