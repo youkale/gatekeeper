@@ -277,6 +277,41 @@ gatekeeper triage \
 
 Dispatch's own state (`order.yaml`, an append-only `journal.jsonl`, per-run logs and RESULT.json/PROGRESS.md evidence) lives at `<GATEKEEPER_CONFIG_DIR, default ~/.config/gatekeeper>/dispatch/orders/<order-id>/` — host-machine state outside every git checkout, the same posture as `controls.yaml`. Dispatch's own exit-code convention differs from every other command: `0` covers a `DELIVERED` result plus most (not all — see `docs/DISPATCH.md`'s exit-code table) harmless no-ops, `2` is a user/config error, `3` is dispatch's own report-and-stop outcome, and `1` is never used (reserved exclusively for `gatekeeper gate`'s block verdict).
 
+A `DELIVERED` work order is only a diff with evidence that an agent finished a task — it still has to be *judged*. `gatekeeper review start <order-id>` picks up that same order and closes the loop: it drives N reviewer-CLI lanes over the resulting diff, machine-harvests their structured `VERDICT.json` judgments, and cycles blocker → fix → incremental-re-review rounds (dispatching fixes back to the *same* order's original author, front-of-terminal, one command at a time) until a human terminates the cycle with `review accept` or `review arbitrate`. Review renders no merge verdict of its own — the only way its outcome becomes `gatekeeper gate` evidence on the actual PR is `review render`'s output being published, through a real GitHub token, as a PR comment or check-run; see [Review: local judgment supervisor](#review-local-judgment-supervisor) below.
+
+## Review: local judgment supervisor
+
+`gatekeeper review` drives N reviewer-CLI lanes through an adversarial, read-only review of a diff — either a
+dispatch order's resulting diff, or an ad-hoc local `--diff` — machine-harvesting each lane's structured
+`VERDICT.json` judgment and cycling blocker → fix → incremental-re-review rounds until a human terminates the cycle
+(`accept` or `arbitrate`). It is the judgment counterpart to `dispatch`'s production: `dispatch start` supervises
+*producing* a diff, `review start` supervises *judging* one. Review never itself renders a merge verdict or blocks a
+merge — the resulting branch/PR still goes through `gatekeeper gate` like any other change; publishing a review
+cycle's outcome as trusted gate evidence is a deliberate, separate, human/CI-driven step (see
+[docs/REVIEW.md](docs/REVIEW.md) §8). See [`docs/REVIEW.md`](docs/REVIEW.md) for the full nine-state machine, the
+`VERDICT.json` evidence contract, the reviewer-lane routing/retry ladder, and the crash-recovery playbook.
+
+| Command | Purpose |
+| --- | --- |
+| `gatekeeper review start [<dispatch-order-id>] [--diff --base <ref> [--head <ref>] [--authored-by <vendor>]...] [--allow-degraded] [--max-parallel <n>] [--yes]` | Create a review cycle and run its front-of-terminal supervision loop for one round, until a report state. The reviewer-tier lane route is frozen at creation (roles-policy.yaml's `reviewer` tier preference order, excluding every authoring vendor); a required-lane shortfall refuses to start unless `--allow-degraded`, which proceeds and marks the cycle `DEGRADED`. |
+| `gatekeeper review status [<cycle-id>] [--json] [--report]` | List every cycle's one-line summary, or show one cycle's full detail: subject, target repo, lane route, and round history. `--report` additionally recomputes the latest round's aggregated blockers, every lane's raw `VERDICT.json`, and a subject-fingerprint check. Read-only, never mutates a cycle. |
+| `gatekeeper review logs <cycle-id> [--round <RN>] [--lane <LN>]` | Print a round's lane log/brief/verdict file paths and each lane's stdout/stderr tail. |
+| `gatekeeper review fix <cycle-id> [--waive <id>=<reason>]... [--adopt <advisory-id>]... [--yes]` | Apply human blocker decisions for a `BLOCKED` (or `AWAITING_ACCEPT`, advisory-only) cycle, dispatch the original coding agent back to fix exactly the still-open blockers, then automatically run the next incremental review round — one command, front-of-terminal. |
+| `gatekeeper review accept <cycle-id> [--note <text>]` | Terminate an `AWAITING_ACCEPT` or `ARBITRATION` cycle as `ACCEPTED` and append a `review-ledger.jsonl` line. |
+| `gatekeeper review arbitrate <cycle-id> --decision accept\|abandon\|extend --reason "..."` | Resolve an `ARBITRATION` cycle (round limit reached, or a required lane could not be formed): `accept`/`abandon` terminate the cycle; `extend` grants exactly one additional round and immediately runs it. |
+| `gatekeeper review resume <cycle-id>` | Reconcile journal/artifact skew, re-adjudicate any orphaned lane by its evidence, and continue a non-terminal cycle to its next report state. The one general-purpose recovery command — always prefer this over re-running `start` on an existing cycle. |
+| `gatekeeper review cancel <cycle-id>` | Journal-terminate a non-terminal cycle as `ABANDONED` and append a `review-ledger.jsonl` line; a no-op on an already-terminal cycle; a still-`PENDING` cycle cannot be cancelled. |
+| `gatekeeper review render <cycle-id> --format comment` | Render a cycle's current state as a version-independent Markdown block, marked with its own sticky-comment marker (never the gate's own). Prints to stdout only — publishing it as an actual PR comment/check-run is left to the caller's own trusted-identity publishing path. |
+
+Review's own state (`cycle.yaml`, an append-only `journal.jsonl`, per-round/per-lane briefs, logs, and `VERDICT.json`
+evidence) lives at `<GATEKEEPER_CONFIG_DIR, default ~/.config/gatekeeper>/review/cycles/<cycle-id>/` — the same
+host-machine-state posture as dispatch's own order directories, and mutually exclusive with dispatch on the same
+target-repo checkout in both directions (see [docs/REVIEW.md](docs/REVIEW.md) §1.4). Review's exit-code convention
+mirrors dispatch's: `2` is a user/config error, `REVIEW_ATTENTION_EXIT_CODE` (`3`) is review's own report-and-stop
+outcome, and `1` is never used (reserved exclusively for `gatekeeper gate`'s block verdict) — but unlike dispatch,
+what `0` means varies per subcommand; see [docs/REVIEW.md](docs/REVIEW.md) §1.3 for the exact, subcommand-by-
+subcommand exit-code table (including two separate exit-code asymmetries it is easy to overgeneralize past).
+
 ## GitHub Action
 
 The action accepts four inputs:

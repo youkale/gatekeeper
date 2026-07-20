@@ -74,11 +74,11 @@
 
 | T-20260721-08 | 常规编码 | review E 包：CLI 命令族 start/status/logs/fix/accept/arbitrate/resume/cancel/render + review-ledger（拆解表E） | sonnet-coder | claude(opus) 主路 2 轮 + 对抗 claude 替补（grok 缺席降级）；release 穿透 blocker 同族第 2 例触发规范修订 | ✅ 验收提交（1053 测试，降级标注） | tasks/records/T-20260721-08-review-cli.md |
 
-| T-20260721-09 | 常规编码（文档化标准面） | review G 包：docs/REVIEW.md + README 节（拆解表G，双 review 不减、双向核对） | sonnet-coder | DISPATCH | 进行中 | - |
+| T-20260721-09 | 常规编码（文档化标准面） | review G 包：docs/REVIEW.md + README 节（拆解表G，双 review 不减、双向核对） | sonnet-coder | opus 主路 3 轮 + 对抗 claude 替补（grok 缺席降级）；R2 精确化反向挖出 E 包代码缺陷 | ✅ 验收提交（1055 测试，降级标注） | tasks/records/T-20260721-09-review-docs.md |
 
 ### 遗留债队列（活动，v1.1 候选）
 
-- [降级补审] T-20260721-07 C 包 + T-20260721-08 E 包 grok 补审（grok 掉登录期间由对抗 claude 替补，通道恢复后增量审）
+- [降级补审] T-20260721-07/08/09 三包 grok 补审（grok 掉登录期间由对抗 claude 替补，通道恢复后一批增量审）
 
 
 - [dogfood] codex headless 模板缺沙箱写权限旗标（dispatch 用途下无法 commit，首个生产订单实证）
