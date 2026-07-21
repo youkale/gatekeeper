@@ -80,7 +80,7 @@
 
 | T-20260721-11 | 常规编码 | review brief 输出契约修复：角色卡旧 VERDICT 契约与 VERDICT.json 冲突消解 + stdout 直录通道显式指令（首个真实 review dogfood 两缺陷） | sonnet-coder | 合并外审双 PASS；dogfood run2 实证契约修复生效 | ✅ 验收提交 | tasks/records/T-20260721-11-brief-contract.md |
 
-| T-20260721-12 | 常规编码（准标准面行为扩展） | 证据门 stdout 通道框架宽容提取：混合输出中定位 VERDICT JSON（语义校验不松），dogfood run2 实锤流式叙述 | sonnet-coder | DISPATCH | 进行中 | - |
+| T-20260721-12 | 常规编码（准标准面行为扩展） | 证据门 stdout 通道框架宽容提取：混合输出中定位 VERDICT JSON（语义校验不松），dogfood run2 实锤流式叙述 | sonnet-coder | claude(opus)+grok 双 PASS（对抗探针/形态审计） | ✅ 验收提交（1083 测试） | tasks/records/T-20260721-12-lenient-extraction.md |
 
 ### 遗留债队列（活动，v1.1 候选）
 

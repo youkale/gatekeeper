@@ -127,7 +127,12 @@ steps needs `review resume`, specifically, to repair.
 judgment receipt. `src/review/evidence.ts`'s evidence gate hard-validates it before a lane's outcome can ever be
 `PASS`/`FAIL`. Producers MUST NOT add fields beyond this table — both representations are strict (zod `.strict()` /
 JSON Schema `additionalProperties: false`) and reject unknown keys outright; a genuinely new field requires an
-explicit `apiVersion` bump, not silent tolerance.
+explicit `apiVersion` bump, not silent tolerance. **Exception, framework-tolerant/semantics-strict:** on the
+stdout-direct channel a lane's raw output may carry narrative wrapped around the JSON object (a captured real-world
+CLI artifact motivated this — `T-20260721-12`); `checkVerdictFile` recovers from a direct-parse failure by scanning
+for balanced top-level JSON objects and treating the **last** one that fully passes this same strict schema as the
+delivered artifact, with every other check (token, round, workspace fingerprint) applying exactly as strictly as it
+always has.
 
 ### 3.1 Top-level field table
 
@@ -488,11 +493,19 @@ mechanically possible — the forgeable surface it would open cannot be closed b
 Honest, current-state list — none of these are silently hidden gaps, and each is a recorded decision or a recorded
 debt, not an oversight:
 
-- **Bare reviewer-CLI JSON output has not been machine-verified end to end against real vendor CLIs.** The evidence
-  gate (§4.2) is exercised in tests against scripted/fake reviewer processes, not yet against three real vendor CLIs
-  each genuinely writing a clean `VERDICT.json` with zero conversational wrapper text around it (package C's own
-  recorded risk 1 at design time). A vendor CLI that cannot be coaxed into clean JSON output degrades that vendor to
-  an advisory-only lane and is recorded as debt, never silently masked as a passing required lane.
+- **Bare reviewer-CLI JSON output has not been machine-verified end to end against every vendor CLI.** A real dogfood
+  run (`T-20260721-12`) confirmed a real vendor CLI's stdout-direct channel does stream narrative around its
+  `VERDICT.json` payload despite prompt instructions to emit JSON only (package C's own recorded risk 1 at design
+  time, now observed for real, not merely anticipated); `checkVerdictFile`'s narrative-tolerant extraction (§3) is the
+  fix for that specific shape, but a full three-real-vendor-CLI sweep against the evidence gate (§4.2) is still not
+  machine-verified end to end. A vendor CLI whose output extraction still cannot recover a valid verdict degrades
+  that vendor to an advisory-only lane and is recorded as debt, never silently masked as a passing required lane.
+- **`VerdictFileReader` has no byte-count ceiling of its own.** `checkVerdictFile`'s narrative-extraction fallback
+  (§3) refuses to *scan* a raw payload above `VERDICT_JSON_SCAN_MAX_BYTES` (1MB), but that ceiling applies only after
+  the injected reader has already fully buffered `raw` into memory — a reader implementation is still free to read an
+  arbitrarily large stdout capture before this function ever sees it. Recorded debt for package B, not a live
+  vulnerability given today's trusted, supervisor-controlled subprocess I/O; worth tightening (a reader-side streaming
+  cap) if reader implementations or trust boundaries ever change.
 - **`review status --report`'s live-recomputed material can drift from the persisted round aggregate.** `--report`
   re-reads each lane's on-disk `VERDICT.json` and a fresh `git rev-parse HEAD` at the moment it is invoked, while
   `rounds/R<n>/aggregate.json` was computed once, durably, at the round's actual conclusion time. If a `VERDICT.json`

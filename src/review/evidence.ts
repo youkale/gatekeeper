@@ -108,10 +108,153 @@ function isMissingPathError(error: unknown): boolean {
 }
 
 /**
+ * The extraction fallback's own byte ceiling (approximated as UTF-16
+ * code-unit length, which for the near-ASCII JSON this gate expects is a
+ * tight proxy for byte size). This does not cap how much a `VerdictFileReader`
+ * itself buffers into `raw` — that stays an open reader-level debt, recorded
+ * in `docs/REVIEW.md` §9 — it only guarantees that a strict-parse failure on
+ * an oversized payload fails closed as CORRUPT immediately, without ever
+ * walking the text looking for candidate JSON objects.
+ */
+const VERDICT_JSON_SCAN_MAX_BYTES = 1_000_000;
+
+/**
+ * Narrow a parsed JSON value to "structurally could be a gatekeeper/v1
+ * verdict" without running the full schema — used only to decide which
+ * extracted candidates are worth a `reviewVerdictSchema` attempt at all.
+ */
+function hasGatekeeperV1ApiVersion(value: unknown): value is Record<string, unknown> {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		!Array.isArray(value) &&
+		(value as Record<string, unknown>).apiVersion === "gatekeeper/v1"
+	);
+}
+
+/**
+ * Scan `raw` once, left to right, for every complete *top-level* `{...}`
+ * object literal — every span whose brace nesting starts at zero and returns
+ * to zero — while treating characters inside JSON string literals (including
+ * escaped quotes) as inert so a brace quoted in narrative prose or inside a
+ * JSON string value never perturbs the count. This is a single linear pass
+ * over a small fixed amount of state (nesting depth, string/escape flags,
+ * one pending start index): O(raw.length) time, O(candidate count) space, no
+ * recursion and no regex, so it cannot backtrack and cannot be driven into
+ * quadratic or worse behavior by adversarial input.
+ *
+ * Deliberately top-level-only rather than "try every `{` as an independent
+ * start": a stdout-direct reviewer CLI wraps its real delivered object in
+ * prose, never inside another JSON object, and any decoy/example JSON
+ * fragment narrative might quote is itself a complete, self-contained
+ * object — so restricting candidates to top-level spans loses nothing a real
+ * reviewer CLI could produce while keeping the scan strictly linear (trying
+ * every `{` as a start point would be quadratic in the worst case on hostile
+ * input). If narrative prose happens to contain an unbalanced literal quote
+ * or brace, the affected region simply fails to yield a usable candidate —
+ * that fails closed into CORRUPT/SCHEMA_MISMATCH downstream, which is the
+ * safe direction for a fail-closed evidence gate.
+ */
+function extractBalancedTopLevelJsonCandidates(raw: string): string[] {
+	const candidates: string[] = [];
+	let depth = 0;
+	let start = -1;
+	let inString = false;
+	let escaped = false;
+	for (let i = 0; i < raw.length; i += 1) {
+		const ch = raw[i];
+		if (inString) {
+			if (escaped) {
+				escaped = false;
+			} else if (ch === "\\") {
+				escaped = true;
+			} else if (ch === '"') {
+				inString = false;
+			}
+			continue;
+		}
+		if (ch === '"') {
+			inString = true;
+			continue;
+		}
+		if (ch === "{") {
+			if (depth === 0) {
+				start = i;
+			}
+			depth += 1;
+			continue;
+		}
+		if (ch === "}" && depth > 0) {
+			depth -= 1;
+			if (depth === 0 && start >= 0) {
+				candidates.push(raw.slice(start, i + 1));
+				start = -1;
+			}
+		}
+	}
+	return candidates;
+}
+
+/**
+ * Best-effort, framework-tolerant recovery for a stdout-direct channel's raw
+ * text that failed a strict `JSON.parse`: extract every complete top-level
+ * JSON object, keep only those that at least look like a gatekeeper/v1
+ * verdict (`apiVersion` literal match), and hand back the *last* one — in
+ * document order — that fully passes `reviewVerdictSchema`. A narrative
+ * preamble can plausibly quote an example or decoy JSON fragment before the
+ * real delivered object, and by convention a streaming CLI's real payload is
+ * emitted last, so "last schema-valid candidate wins" finds a genuine
+ * trailing delivery without being fooled by an earlier decoy.
+ *
+ * Returns `undefined` when no candidate is even structurally a
+ * gatekeeper/v1-tagged object, so the caller falls back to the original
+ * CORRUPT diagnosis unchanged. When at least one such candidate exists but
+ * none passes the full schema, this still returns the last one so the
+ * caller's ordinary `reviewVerdictSchema.safeParse` call reproduces exactly
+ * the SCHEMA_MISMATCH issues extraction would otherwise have had to
+ * duplicate — extraction only ever changes the *value* fed into the existing
+ * strict pipeline, never that pipeline's own pass/fail semantics.
+ */
+function recoverNarrativeWrappedVerdict(raw: string): unknown {
+	const eligible = extractBalancedTopLevelJsonCandidates(raw)
+		.map((candidate) => {
+			try {
+				return JSON.parse(candidate) as unknown;
+			} catch {
+				return undefined;
+			}
+		})
+		.filter((value): value is Record<string, unknown> => value !== undefined && hasGatekeeperV1ApiVersion(value));
+
+	if (eligible.length === 0) {
+		return undefined;
+	}
+	for (let i = eligible.length - 1; i >= 0; i -= 1) {
+		if (reviewVerdictSchema.safeParse(eligible[i]).success) {
+			return eligible[i];
+		}
+	}
+	return eligible[eligible.length - 1];
+}
+
+/**
  * Read and hard-validate VERDICT.json through an injected reader, then perform
  * the sole token and round freshness checks. The public reason set has no
  * read-error variant, so non-missing reader failures conservatively map to
  * CORRUPT rather than escaping or being mistaken for valid evidence.
+ *
+ * Parsing is framework-tolerant, semantics-strict: a direct `JSON.parse`
+ * failure is not immediately fatal. Real stdout-direct reviewer CLIs stream
+ * conversational narrative around their JSON payload (verified against a
+ * captured real-world artifact) — a fact prompt wording cannot reliably
+ * suppress — so a bounded fallback (`recoverNarrativeWrappedVerdict`, guarded
+ * by `VERDICT_JSON_SCAN_MAX_BYTES`) attempts to extract the delivered object
+ * before giving up. This applies identically to both the file and stdout
+ * channels: a clean, file-sourced VERDICT.json parses on the first attempt
+ * and never reaches the extraction path at all. Once a value is in hand —
+ * parsed directly or recovered — every subsequent check (schema, token,
+ * round) is exactly as strict as before; extraction never loosens what
+ * counts as a valid verdict.
  */
 export async function checkVerdictFile(
 	reader: VerdictFileReader,
@@ -136,7 +279,14 @@ export async function checkVerdictFile(
 	try {
 		value = JSON.parse(raw);
 	} catch (error) {
-		return { status: "INVALID", reason: "CORRUPT", message: errorMessage(error) };
+		if (raw.length > VERDICT_JSON_SCAN_MAX_BYTES) {
+			return { status: "INVALID", reason: "CORRUPT", message: errorMessage(error) };
+		}
+		const recovered = recoverNarrativeWrappedVerdict(raw);
+		if (recovered === undefined) {
+			return { status: "INVALID", reason: "CORRUPT", message: errorMessage(error) };
+		}
+		value = recovered;
 	}
 
 	const parsed = reviewVerdictSchema.safeParse(value);
