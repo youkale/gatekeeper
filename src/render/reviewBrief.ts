@@ -61,6 +61,46 @@ export interface ReviewDiffScope {
 	command: string;
 }
 
+/**
+ * Which mechanism actually produces `out/VERDICT.json` for a lane, so the VERDICT.json contract section
+ * below can word its instruction accurately instead of always assuming the reviewer CLI opens and writes
+ * that path itself:
+ *
+ * - `"file"`: the CLI is handed (or otherwise told) the path and writes it directly -- the default, and
+ *   the only channel this module supported before T-20260721-11.
+ * - `"stdout"`: the supervisor captures the lane's entire standard output and writes *that* verbatim to
+ *   `out/VERDICT.json` (src/agent/runner.ts's pipe mode, or placeholder mode with a literal `> {out}`
+ *   shell redirect in the command template -- see `detectReviewResultChannel` below). Any narrative text,
+ *   leading prose, or code-fence wrapper the agent prints becomes part of the "JSON" the supervisor tries
+ *   to parse, so the contract wording must say so explicitly rather than just "write this file" -- a real
+ *   dogfood cycle (rc-20260721t011521570z-9cbc6d93225d) had a reviewer produce a good review narrated in
+ *   markdown instead of a bare JSON object because the brief's wording didn't rule that out.
+ */
+export type ReviewResultChannel = "file" | "stdout";
+
+/**
+ * Infers a lane's result channel from its *unsubstituted* command template (the same string
+ * src/agent/runner.ts's substitutePlaceholders/pipe-mode logic will later run against), so callers (e.g.
+ * src/review/supervisor.ts) do not have to hand-classify every lane themselves:
+ *
+ * - No `{out}` placeholder at all: src/agent/runner.ts's *pipe mode* pipes the brief into stdin and
+ *   captures the command's entire stdout into `outPath` itself -- always a stdout channel.
+ * - `{out}` present but redirected via a trailing shell `>`/`>>` (e.g. `grok --prompt-file {brief} >
+ *   {out}`, the field-tested KNOWN_AGENT_CLIS shape for grok/claude/codex/kimi/pi as of this task): the
+ *   file's content really is "whatever this process printed to stdout" -- same stdout-capture semantics
+ *   as pipe mode, just spelled with an explicit redirect instead of the runner doing the capture.
+ * - `{out}` present but used any other way (e.g. a bare CLI argument like `--output {out}`): the CLI
+ *   itself is responsible for opening and writing that path -- a real file channel.
+ *
+ * Pure string inspection -- no I/O, no knowledge of which CLI is actually installed.
+ */
+export function detectReviewResultChannel(command: string): ReviewResultChannel {
+	if (!command.includes("{out}")) {
+		return "stdout";
+	}
+	return />>?\s*\{out\}(\s|$)/.test(command) ? "stdout" : "file";
+}
+
 /** The material under review: the coding agent's own delivery report and self-reported risks, verbatim. */
 export interface ReviewSubjectMaterial {
 	deliveryReport: string;
@@ -86,11 +126,20 @@ const VERDICT_CATEGORY_VALUES = reviewVerdictSchema.innerType().shape.blockers.e
  * category enum above is -- it is a deliberate literal duplicate. Keep it in sync by hand whenever
  * reviewVerdictSchema changes.
  */
-function renderVerdictContractSection(round: number, runToken: string): string[] {
+function renderVerdictContractSection(
+	round: number,
+	runToken: string,
+	resultChannel: ReviewResultChannel = "file",
+): string[] {
+	const deliveryInstruction =
+		resultChannel === "stdout"
+			? "审查结束后，你的**全部标准输出**将被原样存为本次运行的 `out/VERDICT.json`——只输出一个 JSON 对象，" +
+				"此外不得有任何叙述/前导文本/围栏（严格 schema，多余字段会被拒绝），字段如下："
+			: "审查结束后，必须在本次运行的输出目录写 `out/VERDICT.json`（严格 schema，多余字段会被拒绝），字段如下：";
 	return [
 		"## VERDICT.json 契约",
 		"",
-		"审查结束后，必须在本次运行的输出目录写 `out/VERDICT.json`（严格 schema，多余字段会被拒绝），字段如下：",
+		deliveryInstruction,
 		"",
 		"| 字段 | 类型 | 说明 |",
 		"| --- | --- | --- |",
@@ -141,6 +190,19 @@ function renderSubjectSection(subject: ReviewSubjectMaterial): string[] {
 	];
 }
 
+/**
+ * Explicit arbitration between the embedded role card (docs/roles/code-reviewer.md, a vendor-neutral card
+ * shared across manual-dispatch and gatekeeper-review-driven modes alike -- it still documents a markdown
+ * `VERDICT: PASS | FAIL` output shape as its manual-dispatch default) and this brief's own VERDICT.json
+ * contract below. Without this sentence a reviewer agent that reads the card's own "Output contract"
+ * section first (it appears before this brief's contract, further down the same document) can anchor on
+ * the card's markdown template instead -- exactly what happened in dogfood cycle
+ * rc-20260721t011521570z-9cbc6d93225d: a qualitatively good grok review, delivered as narrated markdown
+ * instead of the JSON the evidence gate requires, correctly rejected.
+ */
+const ROLE_CARD_OUTPUT_OVERRIDE_NOTICE =
+	"角色卡内任何输出格式描述均被本 brief 的 VERDICT.json 契约覆盖，唯一交付物是符合 schema 的 JSON。";
+
 export interface RenderReviewBriefInput {
 	round: number;
 	runToken: string;
@@ -148,6 +210,8 @@ export interface RenderReviewBriefInput {
 	roleCard: string;
 	diffScope: ReviewDiffScope;
 	subject: ReviewSubjectMaterial;
+	/** Defaults to `"file"` (this module's pre-existing behavior) when omitted. See ReviewResultChannel. */
+	resultChannel?: ReviewResultChannel;
 }
 
 /** Renders the round-1 (full, independent) review brief. Pure -- no I/O, no model calls. */
@@ -161,9 +225,10 @@ export function renderReviewBrief(input: RenderReviewBriefInput): string {
 			"independently: do not read any other lane's output before or while forming yours.",
 	);
 	lines.push("", "## 角色卡 (code-reviewer)", "", ...indentedFence(input.roleCard));
+	lines.push("", ROLE_CARD_OUTPUT_OVERRIDE_NOTICE);
 	lines.push(...renderDiffScopeSection("## Diff 范围", input.diffScope));
 	lines.push(...renderSubjectSection(input.subject));
-	lines.push("", ...renderVerdictContractSection(input.round, input.runToken));
+	lines.push("", ...renderVerdictContractSection(input.round, input.runToken, input.resultChannel));
 
 	return `${lines.join("\n")}\n`;
 }
@@ -187,6 +252,8 @@ export interface RenderIncrementalReviewBriefInput {
 	fixCommitRange: ReviewDiffScope;
 	/** The previous round's still-open (not yet waived) blockers, in the order they should be displayed. */
 	priorBlockers: readonly IncrementalPriorBlockerSummary[];
+	/** Defaults to `"file"` (this module's pre-existing behavior) when omitted. See ReviewResultChannel. */
+	resultChannel?: ReviewResultChannel;
 }
 
 const SCOPE_LOCK_INSTRUCTION =
@@ -203,6 +270,7 @@ export function renderIncrementalReviewBrief(input: RenderIncrementalReviewBrief
 			"independently: do not read any other lane's output before or while forming yours.",
 	);
 	lines.push("", "## 角色卡 (code-reviewer)", "", ...indentedFence(input.roleCard));
+	lines.push("", ROLE_CARD_OUTPUT_OVERRIDE_NOTICE);
 	lines.push(...renderDiffScopeSection("## Diff 范围（原始）", input.diffScope));
 	lines.push(...renderDiffScopeSection("## 修复 Commit 范围", input.fixCommitRange));
 	lines.push(...renderSubjectSection(input.subject));
@@ -222,7 +290,7 @@ export function renderIncrementalReviewBrief(input: RenderIncrementalReviewBrief
 	}
 
 	lines.push("", "## 范围锁", "", SCOPE_LOCK_INSTRUCTION);
-	lines.push("", ...renderVerdictContractSection(input.round, input.runToken));
+	lines.push("", ...renderVerdictContractSection(input.round, input.runToken, input.resultChannel));
 
 	return `${lines.join("\n")}\n`;
 }

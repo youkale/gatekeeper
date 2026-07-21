@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+	detectReviewResultChannel,
 	type RenderFixBriefInput,
 	type RenderIncrementalReviewBriefInput,
 	type RenderReviewBriefInput,
@@ -85,6 +86,9 @@ describe("renderReviewBrief", () => {
 		expect(output).toContain("rv1_test-token");
 		expect(output).toContain("本次 round: 1");
 		expect(output).toContain("不得修改仓库任何文件");
+		// F1 fix: the embedded role card's own (manual-dispatch-default) output-format prose must be
+		// explicitly overridden by this brief's VERDICT.json contract, not left to compete with it.
+		expect(output).toContain("角色卡内任何输出格式描述均被本 brief 的 VERDICT.json 契约覆盖");
 
 		// VERDICT.json field table matches src/review/verdict.ts's reviewVerdictSchema field-for-field.
 		for (const field of [
@@ -164,6 +168,28 @@ describe("renderReviewBrief", () => {
 		expect(output).toContain("echo 'oops'");
 		expect(output).not.toContain("break `out` of");
 	});
+
+	it("defaults to the file-channel VERDICT.json wording when resultChannel is omitted", () => {
+		const output = renderReviewBrief(baseReviewInput());
+		expect(output).toContain("必须在本次运行的输出目录写 `out/VERDICT.json`");
+		expect(output).not.toContain("只输出一个 JSON");
+	});
+
+	it("keeps the file-channel wording when resultChannel is explicitly 'file'", () => {
+		const output = renderReviewBrief(baseReviewInput({ resultChannel: "file" }));
+		expect(output).toContain("必须在本次运行的输出目录写 `out/VERDICT.json`");
+		expect(output).not.toContain("只输出一个 JSON");
+	});
+
+	it("switches to the stdout-channel VERDICT.json wording when resultChannel is 'stdout'", () => {
+		// F2 fix: a lane whose command redirects its stdout straight onto the VERDICT.json path (or has
+		// its stdout captured by src/agent/runner.ts's pipe mode) must be told its *entire* stdout becomes
+		// the file -- not just "write this file", which a stdout-only CLI cannot literally do.
+		const output = renderReviewBrief(baseReviewInput({ resultChannel: "stdout" }));
+		expect(output).toContain("只输出一个 JSON");
+		expect(output).toContain("全部标准输出");
+		expect(output).not.toContain("必须在本次运行的输出目录写 `out/VERDICT.json`");
+	});
 });
 
 describe("renderIncrementalReviewBrief", () => {
@@ -181,8 +207,21 @@ describe("renderIncrementalReviewBrief", () => {
 		);
 		expect(output).toContain("不得修改仓库任何文件");
 		expect(output).toContain("本次 round: 2");
+		expect(output).toContain("角色卡内任何输出格式描述均被本 brief 的 VERDICT.json 契约覆盖");
 
 		assertNoLocalAbsolutePaths(output);
+	});
+
+	it("switches to the stdout-channel VERDICT.json wording when resultChannel is 'stdout'", () => {
+		const output = renderIncrementalReviewBrief(baseIncrementalInput({ resultChannel: "stdout" }));
+		expect(output).toContain("只输出一个 JSON");
+		expect(output).toContain("全部标准输出");
+	});
+
+	it("keeps the file-channel wording when resultChannel is omitted", () => {
+		const output = renderIncrementalReviewBrief(baseIncrementalInput());
+		expect(output).toContain("必须在本次运行的输出目录写 `out/VERDICT.json`");
+		expect(output).not.toContain("只输出一个 JSON");
 	});
 
 	it("renders a placeholder when there are no prior unwaived blockers", () => {
@@ -262,5 +301,28 @@ describe("renderFixBrief", () => {
 		expect(output).toContain("Break 'out' of the heading");
 		expect(output).toContain("evidence with 'backticks' and a newline");
 		expect(output).not.toContain("Break `out`\nof the heading");
+	});
+});
+
+describe("detectReviewResultChannel", () => {
+	it("classifies pipe mode (no {out} placeholder at all) as stdout", () => {
+		// src/agent/runner.ts's pipe mode: the brief is piped into stdin and the whole stdout is captured
+		// into outPath by the runner itself -- no placeholder needed for that to happen.
+		expect(detectReviewResultChannel('grok -p "$(cat -)"')).toBe("stdout");
+	});
+
+	it("classifies a trailing '> {out}' shell redirect as stdout", () => {
+		// The exact field-tested KNOWN_AGENT_CLIS shape for grok (src/agent/detect.ts) -- the command that
+		// actually produced dogfood cycle rc-20260721t011521570z-9cbc6d93225d's F2 defect.
+		expect(detectReviewResultChannel("grok --prompt-file {brief} > {out}")).toBe("stdout");
+		expect(detectReviewResultChannel("codex exec --full-auto < {brief} > {out}")).toBe("stdout");
+	});
+
+	it("classifies a trailing '>> {out}' append redirect as stdout", () => {
+		expect(detectReviewResultChannel("some-cli --brief {brief} >> {out}")).toBe("stdout");
+	});
+
+	it("classifies {out} used as a bare CLI argument (no redirect) as file", () => {
+		expect(detectReviewResultChannel("some-cli --brief {brief} --out {out}")).toBe("file");
 	});
 });

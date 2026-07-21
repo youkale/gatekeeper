@@ -9,6 +9,7 @@ import type { GitExecutor } from "../src/dispatch/evidence.js";
 import type { LoadedWorkOrder } from "../src/dispatch/store.js";
 import type { WorkspaceFingerprint } from "../src/dispatch/workspace.js";
 import {
+	appendJournalEvent,
 	type CreateReviewCycleInput,
 	createCycle,
 	type LoadedReviewCycle,
@@ -109,6 +110,32 @@ function reviewer(behavior: ReviewerBehavior): (options: AgentRunOptions) => Pro
 	};
 }
 
+const REAL_REVIEWER_SCRIPT = [
+	'const fs = require("node:fs");',
+	"const mode = process.argv[1];",
+	'const brief = fs.readFileSync(process.argv[2], "utf8");',
+	'const tokenLine = brief.split("\\n").find((line) => line.includes("run_token（必须原样回显）"));',
+	"const runToken = tokenLine && tokenLine.split(String.fromCharCode(96))[1];",
+	"const roundMatch = /本次 round: (\\d+)/.exec(brief);",
+	"const round = roundMatch && Number(roundMatch[1]);",
+	'if (!runToken || !Number.isInteger(round)) throw new Error("invalid review brief");',
+	'const unavailable = mode === "unavailable-first" && round === 1;',
+	'const failing = (mode === "fail-first" && round === 1) || (mode === "unavailable-first" && round === 2);',
+	"const verdict = {",
+	'apiVersion: "gatekeeper/v1",',
+	'verdict: failing ? "fail" : "pass",',
+	'run_token: unavailable ? "wrong-token" : runToken,',
+	"round,",
+	'blockers: failing ? [{ file: "src/fake.ts", title: "real runner blocker", evidence: "fixture evidence" }] : [],',
+	"non_blockers: []",
+	"};",
+	'fs.writeFileSync(process.argv[3], JSON.stringify(verdict) + "\\n", "utf8");',
+].join("");
+
+function realReviewerCommand(mode: "unavailable-first" | "fail-first"): string {
+	return `${JSON.stringify(process.execPath)} -e ${JSON.stringify(REAL_REVIEWER_SCRIPT)} ${mode} {brief} {out}`;
+}
+
 async function makeHarness(lanes: LaneRoute[], overrides: Partial<CreateReviewCycleInput> = {}): Promise<Harness> {
 	const configDirectory = await mkdtemp(path.join(tmpdir(), "gatekeeper-review-supervisor-"));
 	temporaryDirectories.push(configDirectory);
@@ -136,7 +163,7 @@ async function makeHarness(lanes: LaneRoute[], overrides: Partial<CreateReviewCy
 
 function dependencies(
 	harness: Harness,
-	runner: (options: AgentRunOptions) => Promise<AgentRunResult>,
+	runner: ((options: AgentRunOptions) => Promise<AgentRunResult>) | undefined,
 	overrides: Partial<ReviewSupervisorDependencies> = {},
 ): ReviewSupervisorDependencies {
 	let clockTick = 0;
@@ -156,7 +183,7 @@ function dependencies(
 			set: () => ({ timer: ++id }),
 			clear: () => undefined,
 		},
-		runner,
+		...(runner ? { runner } : {}),
 		git,
 		content: {
 			roleCard: "Review independently and return only the required verdict artifact.",
@@ -178,6 +205,46 @@ const claudeRequired: LaneRoute = {
 	command: "claude review",
 	required: true,
 };
+
+async function appendExtensionRoundStart(harness: Harness, previousMaxRounds: number): Promise<void> {
+	const loaded = await loadCycle(harness.cycle.id, { GATEKEEPER_CONFIG_DIR: harness.configDirectory });
+	const round = loaded.journal.reduce((current, event) => (event.type === "ROUND_STARTED" ? event.round : current), 0);
+	await appendJournalEvent(
+		harness.cycle.id,
+		{
+			apiVersion: "gatekeeper/v1",
+			type: "ROUND_STARTED",
+			cycle_id: harness.cycle.id,
+			at: "2026-07-21T02:02:00.000Z",
+			round: round + 1,
+			from: "ARBITRATION",
+			to: "REVIEWING",
+			previous_max_rounds: previousMaxRounds,
+			max_rounds: previousMaxRounds + 1,
+			extension_reason: "exercise the real extend round",
+		},
+		{ GATEKEEPER_CONFIG_DIR: harness.configDirectory },
+	);
+}
+
+async function expectFullExtensionBrief(harness: Harness): Promise<void> {
+	const brief = await readFile(
+		path.join(
+			reviewCycleDirectory(harness.cycle.id, { GATEKEEPER_CONFIG_DIR: harness.configDirectory }),
+			"rounds",
+			"R2",
+			"lanes",
+			"L1-claude",
+			"brief.md",
+		),
+		"utf8",
+	);
+	expect(brief).toContain("## Diff 范围");
+	expect(brief).toContain("git diff main..HEAD --");
+	expect(brief).not.toContain("增量复审");
+	expect(brief).not.toContain("## 修复 Commit 范围");
+	expect(brief).not.toContain("## 范围锁");
+}
 
 describe("review lane supervisor", () => {
 	it("fans out required lanes in parallel and reaches AWAITING_ACCEPT after two PASS verdicts", async () => {
@@ -360,6 +427,74 @@ describe("review lane supervisor", () => {
 		expect(REVIEW_MAX_LANE_SECONDS).toBe(3_600);
 		expect(calls).toBe(2);
 		expect(result.state).toBe("ARBITRATION");
+	});
+});
+
+describe("real-runner arbitration extension rounds", () => {
+	it("drives UNAVAILABLE -> ARBITRATION -> extend through a full R2 review without fix context", async () => {
+		const harness = await makeHarness([{ ...claudeRequired, command: realReviewerCommand("unavailable-first") }]);
+		const deps = dependencies(harness, undefined);
+
+		const first = await superviseReviewCycle(harness.cycle, deps);
+		expect(first).toMatchObject({ state: "ARBITRATION", round: { number: 1, verdict: "UNAVAILABLE" } });
+		await appendExtensionRoundStart(harness, 3);
+
+		const extended = resumeReviewCycle(harness.cycle, deps);
+		await expect(extended).resolves.toMatchObject({ state: "BLOCKED", round: { number: 2, verdict: "FAIL" } });
+		const result = await extended;
+		expect(result.round?.number).toBe(1 + 1);
+		const loaded = await loadCycle(harness.cycle.id, deps.env);
+		expect(loaded.journal.map((event) => event.type)).toEqual([
+			"CYCLE_CREATED",
+			"ROUND_STARTED",
+			"LANE_CONCLUDED",
+			"ROUND_CONCLUDED",
+			"ROUND_STARTED",
+			"LANE_CONCLUDED",
+			"ROUND_CONCLUDED",
+		]);
+		expect(loaded.journal[4]).toMatchObject({ type: "ROUND_STARTED", round: 2, from: "ARBITRATION" });
+		await expectFullExtensionBrief(harness);
+		const aggregate = JSON.parse(
+			await readFile(
+				path.join(reviewCycleDirectory(harness.cycle.id, deps.env), "rounds", "R2", "aggregate.json"),
+				"utf8",
+			),
+		);
+		expect(aggregate.blockers[0]).not.toHaveProperty("newInIncremental");
+		expect(aggregate).not.toHaveProperty("resolvedBlockers");
+		expect(aggregate).not.toHaveProperty("danglingRefs");
+	});
+
+	it("drives FAIL at max_rounds -> ARBITRATION -> extend through a full R2 review without fix context", async () => {
+		const harness = await makeHarness([{ ...claudeRequired, command: realReviewerCommand("fail-first") }], {
+			max_rounds: 1,
+		});
+		const deps = dependencies(harness, undefined);
+
+		const first = await superviseReviewCycle(harness.cycle, deps);
+		expect(first).toMatchObject({ state: "ARBITRATION", round: { number: 1, verdict: "FAIL" } });
+		await appendExtensionRoundStart(harness, 1);
+
+		const extended = resumeReviewCycle(harness.cycle, deps);
+		await expect(extended).resolves.toMatchObject({
+			state: "AWAITING_ACCEPT",
+			round: { number: 2, verdict: "PASS" },
+		});
+		const result = await extended;
+		expect(result.round?.number).toBe(1 + 1);
+		const loaded = await loadCycle(harness.cycle.id, deps.env);
+		expect(loaded.journal.map((event) => event.type)).toEqual([
+			"CYCLE_CREATED",
+			"ROUND_STARTED",
+			"LANE_CONCLUDED",
+			"ROUND_CONCLUDED",
+			"ROUND_STARTED",
+			"LANE_CONCLUDED",
+			"ROUND_CONCLUDED",
+		]);
+		expect(loaded.journal[4]).toMatchObject({ type: "ROUND_STARTED", round: 2, from: "ARBITRATION" });
+		await expectFullExtensionBrief(harness);
 	});
 });
 

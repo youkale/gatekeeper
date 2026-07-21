@@ -20,6 +20,7 @@ import {
 	type WorkspaceFingerprint,
 } from "../dispatch/workspace.js";
 import {
+	detectReviewResultChannel,
 	type ReviewDiffScope,
 	type ReviewSubjectMaterial,
 	renderFixBrief,
@@ -237,6 +238,7 @@ interface RoundRuntime {
 	journal: JournalWriter;
 	paths: RoundPaths;
 	roundNumber: number;
+	roundFrom: Extract<ReviewJournalEvent, { type: "ROUND_STARTED" }>["from"];
 	priorBlockers: readonly AggregatedBlocker[];
 	fixCommitRange?: ReviewDiffScope;
 	maxParallel: number;
@@ -607,14 +609,21 @@ async function executeAttempt(
 		deliveryReport: runtime.loaded.subject,
 		selfReportedRisks: "(not separately supplied)",
 	};
+	// candidate.command is the *unsubstituted* {brief}/{out} template (see runWithTimers below, which hands
+	// it straight to runAgentCommand for placeholder substitution) -- exactly what detectReviewResultChannel
+	// expects. Every lane gets its own detection here rather than one cycle-wide value because a substitute
+	// candidate (see `substitute`/routeCandidate above) can carry a different command/vendor than the
+	// route's original.
+	const resultChannel = detectReviewResultChannel(candidate.command);
 	const brief =
-		runtime.roundNumber === 1
+		runtime.roundFrom !== "FIXING"
 			? renderReviewBrief({
 					round: runtime.roundNumber,
 					runToken,
 					roleCard,
 					diffScope: dependencies.content.diffScope,
 					subject,
+					resultChannel,
 				})
 			: renderIncrementalReviewBrief({
 					round: runtime.roundNumber,
@@ -624,6 +633,7 @@ async function executeAttempt(
 					subject,
 					fixCommitRange: requireIncrementalFixCommitRange(runtime),
 					priorBlockers: runtime.priorBlockers,
+					resultChannel,
 				});
 	await atomicWrite(path.join(directory, "brief.md"), brief, idGenerator);
 	const startedAt = at(now);
@@ -1113,7 +1123,7 @@ async function finishRound(
 	const maxRounds = effectiveMaxRounds(runtime.loaded.cycle.max_rounds, runtime.journal.events);
 	const target = roundConclusionTarget(verdict, runtime.roundNumber, maxRounds);
 	const blockers = aggregateBlockers(laneVerdicts(results));
-	const resolved = runtime.roundNumber > 1 ? resolveRefs(blockers, runtime.priorBlockers) : undefined;
+	const resolved = runtime.roundFrom === "FIXING" ? resolveRefs(blockers, runtime.priorBlockers) : undefined;
 	const warnings = results.flatMap((result) => result.warnings);
 	if (resolved) {
 		for (const dangling of resolved.danglingRefs) {
@@ -1244,7 +1254,7 @@ async function runRound(
 	journal: JournalWriter,
 	dependencies: ReviewSupervisorDependencies,
 	options: ReviewCycleOptions,
-	startFrom: "PENDING" | "FIXING" | "ARBITRATION" | "REVIEWING",
+	startFrom: "PENDING" | "FIXING" | "REVIEWING",
 ): Promise<ReviewSupervisionResult> {
 	const env = dependencies.env ?? process.env;
 	const now = dependencies.now ?? (() => new Date());
@@ -1266,6 +1276,12 @@ async function runRound(
 	if (round <= 0) {
 		throw new ReviewSupervisorError("ROUND_STATE_CORRUPT", "REVIEWING cycle has no ROUND_STARTED event");
 	}
+	const started = [...journal.events]
+		.reverse()
+		.find((event) => event.type === "ROUND_STARTED" && event.round === round);
+	if (started?.type !== "ROUND_STARTED") {
+		throw new ReviewSupervisorError("ROUND_STATE_CORRUPT", `R${round} has no ROUND_STARTED event`);
+	}
 	const paths = await roundPaths(loaded.cycle, round, env);
 	if (!paths.isFinal) {
 		const existing = await readJson<unknown>(path.join(paths.work, ROUND_SUMMARY_FILENAME));
@@ -1286,6 +1302,7 @@ async function runRound(
 		journal,
 		paths,
 		roundNumber: round,
+		roundFrom: started.from,
 		priorBlockers,
 		fixCommitRange: options.fixCommitRange,
 		maxParallel,
@@ -1327,7 +1344,7 @@ async function activeRoundOptions(
 	const started = [...journal.events]
 		.reverse()
 		.find((event) => event.type === "ROUND_STARTED" && event.round === round);
-	if (round <= 1 || started?.type !== "ROUND_STARTED" || started.from !== "FIXING" || options.priorBlockers) {
+	if (started?.type !== "ROUND_STARTED" || started.from !== "FIXING" || options.priorBlockers) {
 		return options;
 	}
 	const context = await readJson<StoredFixContext>(

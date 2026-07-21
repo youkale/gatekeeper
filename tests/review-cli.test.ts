@@ -64,6 +64,43 @@ function captureStderr(): { text: () => string } {
 const AT = "2026-07-21T01:02:03.000Z";
 const FIXED_NOW = () => new Date(AT);
 
+const REAL_REVIEWER_SCRIPT = [
+	'const fs = require("node:fs");',
+	'const brief = fs.readFileSync(process.argv[1], "utf8");',
+	'const tokenLine = brief.split("\\n").find((line) => line.includes("run_token（必须原样回显）"));',
+	"const runToken = tokenLine && tokenLine.split(String.fromCharCode(96))[1];",
+	"const roundMatch = /本次 round: (\\d+)/.exec(brief);",
+	"const round = roundMatch && Number(roundMatch[1]);",
+	'if (!runToken || !Number.isInteger(round)) throw new Error("invalid review brief");',
+	"const failing = round === 1;",
+	"const verdict = {",
+	'apiVersion: "gatekeeper/v1",',
+	'verdict: failing ? "fail" : "pass",',
+	"run_token: runToken,",
+	"round,",
+	'blockers: failing ? [{ file: "src/fake.ts", title: "real runner blocker", evidence: "fixture evidence" }] : [],',
+	"non_blockers: []",
+	"};",
+	'fs.writeFileSync(process.argv[2], JSON.stringify(verdict) + "\\n", "utf8");',
+].join("");
+
+function realReviewerCommand(): string {
+	return `${JSON.stringify(process.execPath)} -e ${JSON.stringify(REAL_REVIEWER_SCRIPT)} {brief} {out}`;
+}
+
+async function realReviewGitRepo(): Promise<string> {
+	const dir = await tempDir("gatekeeper-review-cli-real-runner-");
+	execFileSync("git", ["init", "-q"], { cwd: dir });
+	execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: dir });
+	execFileSync("git", ["config", "user.name", "Test"], { cwd: dir });
+	execFileSync("git", ["remote", "add", "origin", "git@github.com:acme/widgets.git"], { cwd: dir });
+	await writeFile(path.join(dir, "a.txt"), "a\n", "utf8");
+	execFileSync("git", ["add", "a.txt"], { cwd: dir });
+	execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+	execFileSync("git", ["branch", "-m", "main"], { cwd: dir });
+	return dir;
+}
+
 function cycleInput(
 	overrides: Partial<CreateReviewCycleInput> = {},
 	targetPath = "/work/acme/widgets",
@@ -736,6 +773,85 @@ describe("runReviewStatus", () => {
 		expect(detail.report.blockers[0].newInIncremental).toBe(true);
 		expect(detail.report.blockers[0].title).toBe("new regression");
 	});
+
+	it("does not label an ARBITRATION-origin round-2 blocker as NEW_IN_INCREMENTAL", async () => {
+		const { env, created } = await setupCycle({ max_rounds: 1 });
+		await journal(env, {
+			apiVersion: "gatekeeper/v1",
+			type: "ROUND_STARTED",
+			cycle_id: created.cycle.id,
+			at: AT,
+			round: 1,
+			from: "PENDING",
+			to: "REVIEWING",
+		});
+		await writeRoundFixture(env, created.cycle.id, 1, "ARBITRATION", [
+			{
+				route: created.cycle.lane_snapshot[0] as LaneRoute,
+				outcome: "FAIL",
+				verdict: {
+					apiVersion: "gatekeeper/v1",
+					verdict: "fail",
+					run_token: "rv1_r1",
+					round: 1,
+					blockers: [{ file: "src/x.ts", title: "old bug", evidence: "proof" }],
+					non_blockers: [],
+				},
+			},
+		]);
+		await journal(env, {
+			apiVersion: "gatekeeper/v1",
+			type: "ROUND_CONCLUDED",
+			cycle_id: created.cycle.id,
+			at: AT,
+			round: 1,
+			verdict: "FAIL",
+			from: "REVIEWING",
+			to: "ARBITRATION",
+		});
+		await journal(env, {
+			apiVersion: "gatekeeper/v1",
+			type: "ROUND_STARTED",
+			cycle_id: created.cycle.id,
+			at: AT,
+			round: 2,
+			from: "ARBITRATION",
+			to: "REVIEWING",
+			previous_max_rounds: 1,
+			max_rounds: 2,
+			extension_reason: "full re-review",
+		});
+		await writeRoundFixture(env, created.cycle.id, 2, "ARBITRATION", [
+			{
+				route: created.cycle.lane_snapshot[0] as LaneRoute,
+				outcome: "FAIL",
+				verdict: {
+					apiVersion: "gatekeeper/v1",
+					verdict: "fail",
+					run_token: "rv1_r2",
+					round: 2,
+					blockers: [{ file: "src/y.ts", title: "fresh full-review finding", evidence: "proof2" }],
+					non_blockers: [],
+				},
+			},
+		]);
+		await journal(env, {
+			apiVersion: "gatekeeper/v1",
+			type: "ROUND_CONCLUDED",
+			cycle_id: created.cycle.id,
+			at: AT,
+			round: 2,
+			verdict: "FAIL",
+			from: "REVIEWING",
+			to: "ARBITRATION",
+		});
+
+		const jsonStdout = captureStdout();
+		await runReviewStatus({ cycleId: created.cycle.id, report: true, json: true }, "/tmp", { env });
+		const detail = JSON.parse(jsonStdout.text());
+		expect(detail.report.blockers[0].title).toBe("fresh full-review finding");
+		expect(detail.report.blockers[0].newInIncremental).toBeUndefined();
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -1122,6 +1238,57 @@ describe("runReviewArbitrate", () => {
 			round: 2,
 			extension_reason: "one more shot",
 		});
+	});
+
+	it("--decision extend drives a real supervisor and real fake-reviewer process through a full R2 review", async () => {
+		const targetPath = await realReviewGitRepo();
+		const { env, created } = await setupCycle(
+			{
+				max_rounds: 1,
+				lane_snapshot: [
+					{
+						id: "L1-claude",
+						cli: "claude",
+						vendor: "anthropic",
+						command: realReviewerCommand(),
+						required: true,
+					},
+				],
+			},
+			targetPath,
+		);
+		const stdout = captureStdout();
+		const stderr = captureStderr();
+
+		const firstCode = await runReviewResume({ cycleId: created.cycle.id }, "/tmp", { env });
+		expect(firstCode).toBe(REVIEW_ATTENTION_EXIT_CODE);
+		const { loadCycle } = await import("../src/review/store.js");
+		expect((await loadCycle(created.cycle.id, env)).state).toBe("ARBITRATION");
+
+		const extendCode = await runReviewArbitrate(
+			{ cycleId: created.cycle.id, decision: "extend", reason: "real full re-review" },
+			"/tmp",
+			{ env, operator: "integration-test" },
+		);
+		expect(extendCode).toBe(REVIEW_ATTENTION_EXIT_CODE);
+		const reloaded = await loadCycle(created.cycle.id, env);
+		expect(reloaded.state).toBe("AWAITING_ACCEPT");
+		expect(reloaded.rounds.at(-1)?.summary).toMatchObject({ number: 2, verdict: "PASS" });
+		expect(reloaded.journal.find((event) => event.type === "ROUND_STARTED" && event.round === 2)).toMatchObject({
+			from: "ARBITRATION",
+			previous_max_rounds: 1,
+			max_rounds: 2,
+		});
+		const brief = await readFile(
+			path.join(reviewCycleDirectory(created.cycle.id, env), "rounds", "R2", "lanes", "L1-claude", "brief.md"),
+			"utf8",
+		);
+		expect(brief).toContain("## Diff 范围");
+		expect(brief).not.toContain("增量复审");
+		expect(brief).not.toContain("## 修复 Commit 范围");
+		expect(brief).not.toContain("## 范围锁");
+		expect(stdout.text()).toContain("gatekeeper review arbitrate");
+		expect(stderr.text()).not.toContain("FIX_CONTEXT_REQUIRED");
 	});
 
 	it("a release() fault never overrides the already-decided exit code (0 for accept, 3 for abandon), never exit 1", async () => {

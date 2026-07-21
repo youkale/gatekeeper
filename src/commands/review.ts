@@ -190,6 +190,14 @@ function currentRoundNumber(events: readonly ReviewJournalEvent[]): number {
 	return round;
 }
 
+function roundStartedFrom(
+	events: readonly ReviewJournalEvent[],
+	round: number,
+): Extract<ReviewJournalEvent, { type: "ROUND_STARTED" }>["from"] | undefined {
+	const started = [...events].reverse().find((event) => event.type === "ROUND_STARTED" && event.round === round);
+	return started?.type === "ROUND_STARTED" ? started.from : undefined;
+}
+
 /** `NOT_FOUND` (unknown cycle) and `INVALID_DATA` (malformed cycle id) are usage errors; everything else the store raises is review's own report-and-stop territory. Mirrors src/commands/dispatch.ts's loadFailureExitCode. */
 function loadFailureExitCode(error: unknown): number {
 	return error instanceof ReviewStoreError && (error.code === "NOT_FOUND" || error.code === "INVALID_DATA")
@@ -918,7 +926,7 @@ async function buildReportSection(
 	let blockers: ReportBlockerView[] = [];
 	try {
 		const aggregated = aggregateBlockers(verdicts);
-		if (latest.summary.number > 1) {
+		if (roundStartedFrom(loaded.journal, latest.summary.number) === "FIXING") {
 			const previous = loaded.rounds.find((round) => round.summary.number === latest.summary.number - 1);
 			const priorVerdicts = previous ? (await loadRoundLaneVerdicts(cycleDirectory, previous, readFile)).verdicts : [];
 			const priorBlockers = aggregateBlockers(priorVerdicts);

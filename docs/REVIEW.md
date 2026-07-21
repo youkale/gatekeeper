@@ -387,7 +387,7 @@ own adjudicated undecided item 2):
 - `--decision extend`: journals `ROUND_STARTED` (`from: ARBITRATION`, `max_rounds` exactly `+1`, `extension_reason`
   = `--reason`), then immediately, front-of-terminal, drives that freshly-extended round to its own next report
   state — same call convention `start`/`resume` use. Every `extend` grants exactly one additional round; there is
-  no way to grant more than one round in a single `arbitrate` invocation.
+  no way to grant more than one round in a single `arbitrate` invocation. Extend rounds are full re-review rounds.
 
 ### 6.5 `NEW_IN_INCREMENTAL` and the range-lock honesty boundary
 

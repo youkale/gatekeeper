@@ -88,6 +88,16 @@ Do **not** re-litigate code you already reviewed and passed in an earlier round,
 
 ## Output contract
 
+The actual output *format* is specified by whoever is driving this review, not by this card: a `gatekeeper
+review` run hands you a brief whose own VERDICT.json contract section is authoritative and overrides
+anything below; a human orchestrator dispatching you directly may specify something else entirely. This
+card only constrains review *methodology* (what to check, how hard to check it, what counts as a
+blocker) -- always defer to the driving contract for how to deliver the verdict.
+
+The template below is this card's own default for manual-dispatch mode only (no driving contract
+specified a format): a human orchestrator invoking you directly, with no `gatekeeper review` brief in the
+loop, can expect this shape unless told otherwise.
+
 ```
 VERDICT: PASS | FAIL
 

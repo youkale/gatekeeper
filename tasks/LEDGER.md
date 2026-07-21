@@ -76,9 +76,15 @@
 
 | T-20260721-09 | 常规编码（文档化标准面） | review G 包：docs/REVIEW.md + README 节（拆解表G，双 review 不减、双向核对） | sonnet-coder | opus 主路 3 轮 + 对抗 claude 替补（grok 缺席降级）；R2 精确化反向挖出 E 包代码缺陷 | ✅ 验收提交（1055 测试，降级标注） | tasks/records/T-20260721-09-review-docs.md |
 
+| T-20260721-10 | 缺陷修复 | arbitrate extend 真实路径不可运行（grok 补审独家：claude 双路 mock 同源盲区）——extend 轮语义改全量复审 | codex | 合并外审 claude(opus)/grok 双 PASS（grok 亲验自报因果链切断） | ✅ 验收提交（1068 测试） | tasks/records/T-20260721-10-extend-fix.md |
+
+| T-20260721-11 | 常规编码 | review brief 输出契约修复：角色卡旧 VERDICT 契约与 VERDICT.json 冲突消解 + stdout 直录通道显式指令（首个真实 review dogfood 两缺陷） | sonnet-coder | 合并外审双 PASS；dogfood run2 实证契约修复生效 | ✅ 验收提交 | tasks/records/T-20260721-11-brief-contract.md |
+
+| T-20260721-12 | 常规编码（准标准面行为扩展） | 证据门 stdout 通道框架宽容提取：混合输出中定位 VERDICT JSON（语义校验不松），dogfood run2 实锤流式叙述 | sonnet-coder | DISPATCH | 进行中 | - |
+
 ### 遗留债队列（活动，v1.1 候选）
 
-- [降级补审] T-20260721-07/08/09 三包 grok 补审（grok 掉登录期间由对抗 claude 替补，通道恢复后一批增量审）
+
 
 
 - [dogfood] codex headless 模板缺沙箱写权限旗标（dispatch 用途下无法 commit，首个生产订单实证）
