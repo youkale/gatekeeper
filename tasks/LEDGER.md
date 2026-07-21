@@ -82,6 +82,8 @@
 
 | T-20260721-12 | 常规编码（准标准面行为扩展） | 证据门 stdout 通道框架宽容提取：混合输出中定位 VERDICT JSON（语义校验不松），dogfood run2 实锤流式叙述 | sonnet-coder | claude(opus)+grok 双 PASS（对抗探针/形态审计） | ✅ 验收提交（1083 测试） | tasks/records/T-20260721-12-lenient-extraction.md |
 
+| T-20260721-13 | 复杂编码 | review per-lane worktree 事前隔离（T-02 推迟项触发条件已满足：run3 真实 REVIEWER_WROTE_REPO 误归因事故——活跃开发仓的并发写不可与 reviewer 写区分） | codex | 待派 | 排队 | - |
+
 ### 遗留债队列（活动，v1.1 候选）
 
 
